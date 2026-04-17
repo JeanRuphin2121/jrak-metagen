@@ -63,6 +63,12 @@
       <version>4.0.24</version>
     </dependency>
 
+    <!-- YAML serialisation for Config-as-Code export/import -->
+    <dependency>
+      <groupId>com.fasterxml.jackson.dataformat</groupId>
+      <artifactId>jackson-dataformat-yaml</artifactId>
+    </dependency>
+
     <dependency>
       <groupId>org.mapstruct</groupId>
       <artifactId>mapstruct</artifactId>
