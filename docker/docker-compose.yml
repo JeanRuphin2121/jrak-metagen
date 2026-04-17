@@ -1,0 +1,76 @@
+# =============================================================
+# Metagen — Production-like environment
+#
+# Starts the full stack: PostgreSQL + the Spring Boot server.
+#
+# Required environment variables (set in a .env file or shell):
+#   METAGEN_DB_PASSWORD   — PostgreSQL password
+#   METAGEN_JWT_SECRET    — JWT signing secret (min 32 chars)
+#   METAGEN_ADMIN_PASSWORD — Initial admin user password
+#   ANTHROPIC_API_KEY     — (Optional) For AI assistant features
+#
+# Usage:
+#   cp .env.example .env   # fill in secrets
+#   docker compose -f docker/docker-compose.yml up -d
+# =============================================================
+
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: metagen-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       metagen
+      POSTGRES_USER:     metagen
+      POSTGRES_PASSWORD: ${METAGEN_DB_PASSWORD:?METAGEN_DB_PASSWORD is required}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U metagen -d metagen"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    # Do NOT expose port 5432 in production — only the app needs it
+    networks:
+      - metagen-internal
+
+  server:
+    image: metagen-server:latest
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: metagen-server
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      METAGEN_DB_URL:           jdbc:postgresql://postgres:5432/metagen
+      METAGEN_DB_USER:          metagen
+      METAGEN_DB_PASSWORD:      ${METAGEN_DB_PASSWORD}
+      METAGEN_JWT_SECRET:       ${METAGEN_JWT_SECRET:?METAGEN_JWT_SECRET is required}
+      METAGEN_ADMIN_PASSWORD:   ${METAGEN_ADMIN_PASSWORD:-changeme}
+      METAGEN_AI_ENABLED:       ${METAGEN_AI_ENABLED:-false}
+      ANTHROPIC_API_KEY:        ${ANTHROPIC_API_KEY:-}
+      SPRING_PROFILES_ACTIVE:   prod
+      SERVER_PORT:              8080
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - metagen-internal
+      - metagen-external
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+volumes:
+  postgres_data:
+
+networks:
+  metagen-internal:
+    internal: true     # postgres is not reachable from outside
+  metagen-external:

@@ -1,0 +1,54 @@
+# ── Build output ────────────────────────────────────────────
+target/
+!.mvn/wrapper/maven-wrapper.jar
+!**/src/main/**/target/
+!**/src/test/**/target/
+
+# ── Maven ────────────────────────────────────────────────────
+.mvn/
+!.mvn/wrapper/
+*.class
+
+# ── Secrets — NEVER commit these ─────────────────────────────
+.env
+*.env
+!.env.example
+!docker/.env.example
+application-local.yml
+application-local.properties
+
+# ── IDE — IntelliJ IDEA ───────────────────────────────────────
+.idea/
+*.iws
+*.iml
+*.ipr
+out/
+
+# ── IDE — Eclipse ─────────────────────────────────────────────
+.classpath
+.project
+.settings/
+bin/
+
+# ── IDE — VS Code ─────────────────────────────────────────────
+.vscode/
+!.vscode/extensions.json
+
+# ── OS ────────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# ── Logs ─────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── Node (future frontend module) ────────────────────────────
+node_modules/
+dist/
+.next/
+.nuxt/

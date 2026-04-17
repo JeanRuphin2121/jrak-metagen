@@ -1,0 +1,120 @@
+# =============================================================
+# Metagen Platform — application configuration
+#
+# Override any property via environment variables using Spring's
+# relaxed binding: SPRING_DATASOURCE_URL, METAGEN_JWT_SECRET, etc.
+# =============================================================
+
+spring:
+  application:
+    name: metagen
+
+  # ── Database ───────────────────────────────────────────────
+  datasource:
+    url: ${METAGEN_DB_URL:jdbc:postgresql://localhost:5432/metagen}
+    username: ${METAGEN_DB_USER:metagen}
+    password: ${METAGEN_DB_PASSWORD:metagen}
+    hikari:
+      maximum-pool-size: ${METAGEN_DB_POOL_SIZE:10}
+      connection-timeout: 30000
+      idle-timeout: 600000
+
+  # ── JPA ────────────────────────────────────────────────────
+  jpa:
+    open-in-view: false          # never block HTTP threads on lazy loading
+    show-sql: false
+    hibernate:
+      ddl-auto: validate         # Flyway owns the schema — JPA only validates
+    properties:
+      hibernate:
+        format_sql: true
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        jdbc:
+          time_zone: UTC
+
+  # ── Flyway ─────────────────────────────────────────────────
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: false
+
+  # ── Security ───────────────────────────────────────────────
+  security:
+    # Configured programmatically in SecurityConfig.java
+    # Disable default form login
+    user:
+      name: ${METAGEN_ADMIN_USER:admin}
+      password: ${METAGEN_ADMIN_PASSWORD:changeme}
+
+# ── Server ─────────────────────────────────────────────────────
+server:
+  port: ${PORT:8080}
+  servlet:
+    context-path: /
+  compression:
+    enabled: true
+    mime-types: application/json,text/html,text/css,application/javascript
+
+# ── Actuator ───────────────────────────────────────────────────
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: when-authorized
+
+# ── OpenAPI / Swagger ──────────────────────────────────────────
+springdoc:
+  api-docs:
+    path: /api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    operations-sorter: alpha
+    tags-sorter: alpha
+
+# ── Metagen custom properties ──────────────────────────────────
+metagen:
+  jwt:
+    secret: ${METAGEN_JWT_SECRET:change-this-secret-in-production-min-32-chars}
+    expiration-ms: ${METAGEN_JWT_EXPIRATION_MS:86400000}   # 24h
+  studio:
+    enabled: ${METAGEN_STUDIO_ENABLED:true}
+  ai:
+    enabled: ${METAGEN_AI_ENABLED:false}
+    provider: claude
+    model: ${METAGEN_AI_MODEL:claude-sonnet-4-6}
+    api-key: ${ANTHROPIC_API_KEY:}
+
+---
+# ── Dev profile ────────────────────────────────────────────────
+spring:
+  config:
+    activate:
+      on-profile: dev
+  jpa:
+    show-sql: true
+  devtools:
+    restart:
+      enabled: true
+
+logging:
+  level:
+    io.metagen: DEBUG
+    org.hibernate.SQL: DEBUG
+
+---
+# ── Test profile ───────────────────────────────────────────────
+spring:
+  config:
+    activate:
+      on-profile: test
+  jpa:
+    show-sql: false
+  flyway:
+    clean-on-validation-error: true
+
+logging:
+  level:
+    io.metagen: INFO
