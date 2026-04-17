@@ -1,0 +1,11 @@
+# Normalize line endings to LF in the repository,
+# regardless of the developer's OS.
+* text=auto eol=lf
+
+# Binary files — never touch line endings
+*.jar   binary
+*.png   binary
+*.jpg   binary
+*.gif   binary
+*.ico   binary
+*.zip   binary
