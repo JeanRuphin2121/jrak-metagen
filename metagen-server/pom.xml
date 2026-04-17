@@ -101,6 +101,12 @@
       <artifactId>mapstruct</artifactId>
     </dependency>
 
+    <!-- Caffeine in-memory cache -->
+    <dependency>
+      <groupId>com.github.ben-manes.caffeine</groupId>
+      <artifactId>caffeine</artifactId>
+    </dependency>
+
     <!-- Dev tools (hot reload) -->
     <dependency>
       <groupId>org.springframework.boot</groupId>
