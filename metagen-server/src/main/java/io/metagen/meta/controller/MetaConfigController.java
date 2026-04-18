@@ -1,15 +1,19 @@
 package io.metagen.meta.controller;
 
+import io.metagen.ai.MetaProposal;
+import io.metagen.engine.config.MetaYamlDto;
 import io.metagen.engine.config.MetaYamlExporter;
 import io.metagen.engine.config.MetaYamlImporter;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -64,5 +68,87 @@ public class MetaConfigController {
     public Map<String, Object> importConfig(@RequestBody String yaml) {
         MetaYamlImporter.ImportResult result = importer.importYaml(yaml);
         return result.toMap();
+    }
+
+    @PostMapping("/import-proposal")
+    @Operation(
+        summary = "Import an AI-generated proposal",
+        description = "Converts a MetaProposal (from POST /api/ai/generate) into metadata. Non-destructive.")
+    public Map<String, Object> importProposal(@RequestBody MetaProposal proposal) {
+        MetaYamlDto dto = proposalToDto(proposal);
+        MetaYamlImporter.ImportResult result = importer.importDto(dto);
+        return result.toMap();
+    }
+
+    // ── Conversion ────────────────────────────────────────────────────
+
+    private static MetaYamlDto proposalToDto(MetaProposal proposal) {
+        var dto = new MetaYamlDto();
+
+        // Workflows
+        if (proposal.getWorkflows() != null) {
+            dto.setWorkflows(proposal.getWorkflows().stream()
+                .map(MetaConfigController::workflowToYaml)
+                .toList());
+        }
+
+        // Entities
+        if (proposal.getEntities() != null) {
+            dto.setEntities(proposal.getEntities().stream()
+                .map(MetaConfigController::entityToYaml)
+                .toList());
+        }
+
+        return dto;
+    }
+
+    private static MetaYamlDto.WorkflowYaml workflowToYaml(MetaProposal.WorkflowProposal w) {
+        var y = new MetaYamlDto.WorkflowYaml();
+        y.setName(w.getName());
+        y.setLabel(w.getLabel());
+        if (w.getStates() != null) {
+            y.setStates(w.getStates().stream().map(s -> {
+                var sy = new MetaYamlDto.StateYaml();
+                sy.setName(s.getName());
+                sy.setLabel(s.getLabel() != null ? s.getLabel() : s.getName());
+                sy.setInitial(s.isInitial());
+                sy.setTerminal(s.isTerminal());
+                sy.setColor(s.getColor());
+                return sy;
+            }).toList());
+        }
+        if (w.getTransitions() != null) {
+            y.setTransitions(w.getTransitions().stream().map(t -> {
+                var ty = new MetaYamlDto.TransitionYaml();
+                ty.setFrom(t.getFrom());
+                ty.setTo(t.getTo());
+                ty.setLabel(t.getLabel());
+                ty.setRequiredRole(t.getRequiredRole());
+                return ty;
+            }).toList());
+        }
+        return y;
+    }
+
+    private static MetaYamlDto.EntityYaml entityToYaml(MetaProposal.EntityProposal e) {
+        var y = new MetaYamlDto.EntityYaml();
+        y.setName(e.getName());
+        y.setLabel(e.getLabel());
+        y.setDescription(e.getDescription());
+        y.setWorkflow(e.getWorkflow());
+        if (e.getFields() != null) {
+            y.setFields(e.getFields().stream().map(f -> {
+                var fy = new MetaYamlDto.FieldYaml();
+                fy.setName(f.getName());
+                fy.setLabel(f.getLabel());
+                fy.setType(f.getType());
+                fy.setRequired(f.isRequired());
+                fy.setUnique(f.isUnique());
+                fy.setSearchable(f.isSearchable());
+                fy.setOptions(f.getOptions());
+                return fy;
+            }).toList());
+        }
+        return y;
     }
 }

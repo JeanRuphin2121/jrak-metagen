@@ -134,36 +134,56 @@ export interface GenerateRequest {
 export interface FieldProposal {
   name: string
   label: string
-  type: MetaFieldType
+  type: string           // MetaFieldType name
   required: boolean
+  unique: boolean
   searchable: boolean
+  options?: Record<string, unknown>
+}
+
+export interface StateProposal {
+  name: string
+  label: string
+  initial: boolean
+  terminal: boolean
+  color: string | null
 }
 
 export interface TransitionProposal {
-  name: string
+  from: string
+  to: string
   label: string
-  fromState: string
-  toState: string
+  requiredRole: string | null
 }
 
 export interface WorkflowProposal {
   name: string
   label: string
-  states: string[]
-  initialState: string
+  states: StateProposal[]
   transitions: TransitionProposal[]
 }
 
 export interface EntityProposal {
   name: string
   label: string
+  description: string | null
+  workflow: string | null    // workflow name reference
   fields: FieldProposal[]
-  workflow: WorkflowProposal | null
 }
 
 export interface MetaProposal {
   entities: EntityProposal[]
-  summary: string
+  workflows: WorkflowProposal[]
+  explanation: string
+}
+
+// ── User management ───────────────────────────────────────────────────────────
+
+export interface CreateUserRequest {
+  username: string
+  email: string
+  password: string
+  roles: string[]
 }
 
 // ── Dynamic data ──────────────────────────────────────────────────────────────

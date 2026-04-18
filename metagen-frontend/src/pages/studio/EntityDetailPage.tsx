@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, Plus, Trash2 } from 'lucide-react'
+import { ArrowLeft, Plus, Table2 } from 'lucide-react'
 import api from '@/lib/api'
 import { MetaEntity, AddFieldRequest, MetaFieldType } from '@/types/meta'
 
@@ -57,6 +57,13 @@ export default function EntityDetailPage() {
           <h1 className="text-2xl font-bold text-gray-900">{entity.label}</h1>
           <p className="text-xs text-gray-400 font-mono">{entity.name} · {entity.tableName}</p>
         </div>
+        <Link
+          to={`/data/${name}`}
+          className="flex items-center gap-2 rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+        >
+          <Table2 size={15} />
+          Browse data
+        </Link>
         <button
           onClick={() => deployEntity.mutate()}
           disabled={deployEntity.isPending}

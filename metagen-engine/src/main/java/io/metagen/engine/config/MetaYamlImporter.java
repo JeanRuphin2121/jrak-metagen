@@ -67,13 +67,21 @@ public class MetaYamlImporter {
         } catch (IOException e) {
             throw new IllegalArgumentException("Invalid YAML: " + e.getMessage(), e);
         }
+        return importDto(dto);
+    }
 
+    /**
+     * Applies an already-parsed {@link MetaYamlDto} to the database.
+     * Called directly (without YAML round-trip) by the AI proposal import endpoint.
+     *
+     * @return summary of what was created/updated
+     */
+    @Transactional
+    public ImportResult importDto(MetaYamlDto dto) {
         var result = new ImportResult();
-
         importRoles(dto.getRoles(), result);
         importWorkflows(dto.getWorkflows(), result);
         importEntities(dto.getEntities(), result);
-
         log.info("Import complete: {}", result.summary());
         return result;
     }
