@@ -1,29 +1,27 @@
 package io.metagen.meta.dto;
 
-import io.metagen.core.domain.*;
+import com.fasterxml.jackson.databind.JsonNode;
+import io.metagen.core.domain.MetaEntity;
+import io.metagen.core.domain.MetaField;
+import io.metagen.core.domain.MetaFieldType;
 
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
 
-/**
- * API response representing a {@link MetaEntity} with its fields.
- * Used by both the list endpoint (without fields) and the detail endpoint (with fields).
- */
 public record MetaEntityResponse(
-    UUID          id,
-    String        name,
-    String        label,
-    String        tableName,
-    String        description,
-    boolean       softDelete,
-    boolean       auditable,
-    String        workflowName,
+    UUID           id,
+    String         name,
+    String         label,
+    String         tableName,
+    String         description,
+    boolean        softDelete,
+    boolean        auditable,
+    String         workflowName,
     List<FieldDto> fields,
-    Instant       createdAt,
-    Instant       updatedAt
+    Instant        createdAt,
+    Instant        updatedAt
 ) {
-
     public record FieldDto(
         UUID          id,
         String        name,
@@ -33,31 +31,22 @@ public record MetaEntityResponse(
         boolean       unique,
         boolean       searchable,
         String        defaultValue,
+        JsonNode      options,
         int           position
-    ) {}
-
-    // ── Factory ──────────────────────────────────────────────────────
+    ) {
+        public static FieldDto from(MetaField f) {
+            return new FieldDto(f.getId(), f.getName(), f.getLabel(), f.getType(),
+                f.isRequired(), f.isUnique(), f.isSearchable(),
+                f.getDefaultValue(), f.getOptions(), f.getPosition());
+        }
+    }
 
     public static MetaEntityResponse from(MetaEntity e) {
-        var fields = e.getFields().stream()
-            .map(f -> new FieldDto(
-                f.getId(), f.getName(), f.getLabel(), f.getType(),
-                f.isRequired(), f.isUnique(), f.isSearchable(),
-                f.getDefaultValue(), f.getPosition()))
-            .toList();
-
         return new MetaEntityResponse(
-            e.getId(),
-            e.getName(),
-            e.getLabel(),
-            e.getTableName(),
-            e.getDescription(),
-            e.isSoftDelete(),
-            e.isAuditable(),
+            e.getId(), e.getName(), e.getLabel(), e.getTableName(), e.getDescription(),
+            e.isSoftDelete(), e.isAuditable(),
             e.getWorkflow() != null ? e.getWorkflow().getName() : null,
-            fields,
-            e.getCreatedAt(),
-            e.getUpdatedAt()
-        );
+            e.getFields().stream().map(FieldDto::from).toList(),
+            e.getCreatedAt(), e.getUpdatedAt());
     }
 }

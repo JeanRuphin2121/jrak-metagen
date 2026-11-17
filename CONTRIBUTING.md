@@ -45,7 +45,7 @@ Types: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `perf`
 Examples:
 ```
 feat(engine): add dynamic CRUD endpoint generation
-fix(rbac): apply row filter script on list queries
+fix(rbac): apply row filter on list queries
 docs(architecture): add workflow engine design notes
 test(core): add MetaEntity repository integration tests
 ```
@@ -67,13 +67,13 @@ test(core): add MetaEntity repository integration tests
 
 ```bash
 # Unit tests
-./mvnw test
+mvn test
 
 # Integration tests (requires Docker)
-./mvnw verify -pl metagen-server
+mvn verify -pl metagen-server
 
 # Single test class
-./mvnw test -pl metagen-core -Dtest=MetaEntityRepositoryTest
+mvn test -pl metagen-core -Dtest=MetaEntityRepositoryTest
 ```
 
 Integration tests use **Testcontainers** to spin up a real PostgreSQL instance. No mocking of the database — this is intentional and critical for correctness.

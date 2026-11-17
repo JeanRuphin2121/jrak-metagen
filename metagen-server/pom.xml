@@ -33,6 +33,11 @@
       <artifactId>metagen-engine</artifactId>
     </dependency>
 
+    <dependency>
+      <groupId>io.metagen</groupId>
+      <artifactId>metagen-ai</artifactId>
+    </dependency>
+
     <!-- Spring Boot starters -->
     <dependency>
       <groupId>org.springframework.boot</groupId>

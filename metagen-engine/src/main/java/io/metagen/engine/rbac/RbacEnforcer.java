@@ -3,185 +3,136 @@ package io.metagen.engine.rbac;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.metagen.core.domain.MetaEntity;
 import io.metagen.core.domain.MetaPermission;
-import io.metagen.core.repository.MetaPermissionRepository;
+import io.metagen.engine.expr.Condition;
+import io.metagen.engine.meta.MetaModelService;
 import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.cache.annotation.Cacheable;
 import org.springframework.stereotype.Component;
 
-import java.util.*;
-import java.util.stream.StreamSupport;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 /**
- * RBAC (Role-Based Access Control) enforcement for the runtime engine.
+ * Applies role-based access control to runtime (data) requests.
  *
- * <h2>How permissions work</h2>
- * <ol>
- *   <li>The JWT contains the user's role names (e.g. {@code ["BUYER", "USER"]}).</li>
- *   <li>On each request, the enforcer looks up all {@link MetaPermission} rows
- *       matching any of those roles for the target entity.</li>
- *   <li>Permissions are <em>additive</em>: having at least one role that
- *       grants {@code canRead} is sufficient to read.</li>
- *   <li>Row-level filter scripts from all matching permissions are combined
- *       with {@code OR}, so a user sees records accessible by <em>any</em>
- *       of their roles.</li>
- *   <li>Field masking is the union of hidden/readonly sets across all roles.</li>
- * </ol>
- *
- * <h2>ADMIN bypass</h2>
- * Users with the {@code ADMIN} role bypass all permission checks and see
- * all fields and all rows.
+ * <p>Semantics when a user holds several roles — the most permissive grant wins:
+ * <ul>
+ *   <li>an access level is allowed if <em>any</em> role grants it;</li>
+ *   <li>row filters of the roles granting that level are OR-ed, and a grant
+ *       without a filter lifts the restriction entirely;</li>
+ *   <li>a field is hidden / read-only only if <em>every</em> granting role
+ *       hides / locks it.</li>
+ * </ul>
+ * The built-in {@code ADMIN} role bypasses all checks.
  */
-@Slf4j
 @Component
 @RequiredArgsConstructor
 public class RbacEnforcer {
 
-    private static final String ADMIN_ROLE = "ADMIN";
+    public static final String ADMIN_ROLE = "ADMIN";
 
-    private final MetaPermissionRepository permissionRepository;
+    private final MetaModelService metaModel;
 
-    // ── Assert methods ────────────────────────────────────────────────
-
-    public void assertCanRead(List<String> roles, MetaEntity entity) {
+    public void assertAllowed(List<String> roles, MetaEntity entity, Access access) {
         if (isAdmin(roles)) return;
-        boolean allowed = resolve(roles, entity).stream().anyMatch(MetaPermission::isCanRead);
-        if (!allowed) throw new SecurityException(
-            "Role(s) " + roles + " do not have READ on '" + entity.getName() + "'");
-    }
-
-    public void assertCanWrite(List<String> roles, MetaEntity entity) {
-        if (isAdmin(roles)) return;
-        boolean allowed = resolve(roles, entity).stream().anyMatch(MetaPermission::isCanWrite);
-        if (!allowed) throw new SecurityException(
-            "Role(s) " + roles + " do not have WRITE on '" + entity.getName() + "'");
-    }
-
-    public void assertCanDelete(List<String> roles, MetaEntity entity) {
-        if (isAdmin(roles)) return;
-        boolean allowed = resolve(roles, entity).stream().anyMatch(MetaPermission::isCanDelete);
-        if (!allowed) throw new SecurityException(
-            "Role(s) " + roles + " do not have DELETE on '" + entity.getName() + "'");
-    }
-
-    // ── Row filter ────────────────────────────────────────────────────
-
-    /**
-     * Builds a SQL WHERE fragment combining all row-filter scripts for the user's roles.
-     *
-     * <p>Multiple scripts are joined with {@code OR} so the user sees any row
-     * accessible by at least one of their roles.</p>
-     *
-     * @return SQL fragment (never null; empty string means no filter)
-     */
-    public String buildRowFilter(List<String> roles, MetaEntity entity) {
-        if (isAdmin(roles)) return "";
-
-        var fragments = resolve(roles, entity).stream()
-            .map(MetaPermission::getRowFilterScript)
-            .filter(s -> s != null && !s.isBlank())
-            .distinct()
-            .toList();
-
-        if (fragments.isEmpty()) return "";
-        if (fragments.size() == 1) return fragments.getFirst();
-        return fragments.stream()
-                        .map(f -> "(" + f + ")")
-                        .reduce((a, b) -> a + " OR " + b)
-                        .orElse("");
-    }
-
-    // ── Field masking ─────────────────────────────────────────────────
-
-    /**
-     * Removes hidden fields from a record map.
-     * Fields marked as hidden are stripped; the record is returned as-is
-     * otherwise.
-     *
-     * @param record  the raw record from the database
-     * @param roles   the user's roles
-     * @param entity  the entity metadata
-     * @return a new map with hidden fields removed
-     */
-    public Map<String, Object> applyFieldMask(Map<String, Object> record,
-                                               List<String> roles,
-                                               MetaEntity entity) {
-        if (isAdmin(roles)) return record;
-
-        Set<String> hiddenFields = collectHiddenFields(roles, entity);
-        if (hiddenFields.isEmpty()) return record;
-
-        var result = new LinkedHashMap<>(record);
-        hiddenFields.forEach(result::remove);
-        return result;
-    }
-
-    /**
-     * Filters a request body to only keep fields the user is allowed to write.
-     * Readonly fields are silently dropped (not an error — just ignored).
-     *
-     * @param body    original request body
-     * @param roles   the user's roles
-     * @param entity  the entity metadata
-     * @return filtered map with readonly/hidden fields removed
-     */
-    public Map<String, Object> filterWritableFields(Map<String, Object> body,
-                                                     List<String> roles,
-                                                     MetaEntity entity) {
-        if (isAdmin(roles)) return body;
-
-        Set<String> readonlyFields = collectReadonlyFields(roles, entity);
-        Set<String> hiddenFields   = collectHiddenFields(roles, entity);
-        Set<String> blocked        = new HashSet<>();
-        blocked.addAll(readonlyFields);
-        blocked.addAll(hiddenFields);
-
-        if (blocked.isEmpty()) return body;
-
-        var result = new LinkedHashMap<>(body);
-        blocked.forEach(result::remove);
-        return result;
-    }
-
-    // ── Permission resolution (cached) ────────────────────────────────
-
-    /**
-     * Resolves all permissions for the given roles and entity.
-     * Cached per (sorted role list + entity name) pair.
-     */
-    @Cacheable(cacheNames = "rbacPermissions",
-               key = "#roles.stream().sorted().toList().toString() + ':' + #entity.name")
-    public List<MetaPermission> resolve(List<String> roles, MetaEntity entity) {
-        if (roles.isEmpty()) return List.of();
-        return permissionRepository.findByRoleNamesAndEntityName(roles, entity.getName());
-    }
-
-    // ── Private helpers ───────────────────────────────────────────────
-
-    private boolean isAdmin(List<String> roles) {
-        return roles.contains(ADMIN_ROLE);
-    }
-
-    private Set<String> collectHiddenFields(List<String> roles, MetaEntity entity) {
-        return collectFieldsByMaskKey(roles, entity, "hidden");
-    }
-
-    private Set<String> collectReadonlyFields(List<String> roles, MetaEntity entity) {
-        return collectFieldsByMaskKey(roles, entity, "readonly");
-    }
-
-    private Set<String> collectFieldsByMaskKey(List<String> roles,
-                                                MetaEntity entity,
-                                                String key) {
-        var result = new HashSet<String>();
-        for (MetaPermission perm : resolve(roles, entity)) {
-            JsonNode mask = perm.getFieldMask();
-            if (mask != null && mask.has(key)) {
-                StreamSupport.stream(mask.get(key).spliterator(), false)
-                    .map(JsonNode::asText)
-                    .forEach(result::add);
-            }
+        if (granting(roles, entity, access).isEmpty()) {
+            throw new SecurityException(
+                "You do not have " + access + " access on '" + entity.getName() + "'");
         }
+    }
+
+    public boolean isAllowed(List<String> roles, MetaEntity entity, Access access) {
+        return isAdmin(roles) || !granting(roles, entity, access).isEmpty();
+    }
+
+    /**
+     * Row-level restriction for the given access level.
+     *
+     * @return {@code null} when the user is unrestricted
+     */
+    public Condition rowFilter(List<String> roles, MetaEntity entity, Access access) {
+        if (isAdmin(roles)) return null;
+        List<Condition> filters = new ArrayList<>();
+        for (MetaPermission perm : granting(roles, entity, access)) {
+            Condition c = Condition.parse(perm.getRowFilter());
+            if (c == null) return null;          // one unrestricted grant is enough
+            filters.add(c);
+        }
+        return Condition.anyOf(filters);
+    }
+
+    public Set<String> hiddenFields(List<String> roles, MetaEntity entity) {
+        if (isAdmin(roles)) return Set.of();
+        return intersect(granting(roles, entity, Access.READ), "hidden");
+    }
+
+    /** Fields the user may not write: read-only or hidden for every write-granting role. */
+    public Set<String> readonlyFields(List<String> roles, MetaEntity entity) {
+        if (isAdmin(roles)) return Set.of();
+        List<MetaPermission> writers = granting(roles, entity, Access.WRITE);
+        Set<String> blocked = null;
+        for (MetaPermission perm : writers) {
+            Set<String> own = new HashSet<>(maskEntries(perm, "readonly"));
+            own.addAll(maskEntries(perm, "hidden"));
+            if (blocked == null) blocked = own; else blocked.retainAll(own);
+        }
+        return blocked == null ? Set.of() : blocked;
+    }
+
+    public EntityAccess describe(List<String> roles, MetaEntity entity) {
+        return new EntityAccess(
+            isAllowed(roles, entity, Access.READ),
+            isAllowed(roles, entity, Access.WRITE),
+            isAllowed(roles, entity, Access.DELETE),
+            hiddenFields(roles, entity),
+            readonlyFields(roles, entity));
+    }
+
+    /** Removes the fields the user may not see. */
+    public Map<String, Object> applyFieldMask(Map<String, Object> record,
+                                              List<String> roles,
+                                              MetaEntity entity) {
+        Set<String> hidden = hiddenFields(roles, entity);
+        if (hidden.isEmpty()) return record;
+        var result = new LinkedHashMap<>(record);
+        hidden.forEach(result::remove);
         return result;
+    }
+
+    public boolean isAdmin(List<String> roles) {
+        return roles != null && roles.contains(ADMIN_ROLE);
+    }
+
+    // ── Internals ─────────────────────────────────────────────────────────
+
+    private List<MetaPermission> granting(List<String> roles, MetaEntity entity, Access access) {
+        return metaModel.permissions(roles, entity.getName()).stream()
+            .filter(p -> switch (access) {
+                case READ   -> p.isCanRead();
+                case WRITE  -> p.isCanWrite();
+                case DELETE -> p.isCanDelete();
+            })
+            .toList();
+    }
+
+    private Set<String> intersect(List<MetaPermission> perms, String key) {
+        Set<String> result = null;
+        for (MetaPermission perm : perms) {
+            Set<String> own = maskEntries(perm, key);
+            if (result == null) result = new HashSet<>(own); else result.retainAll(own);
+        }
+        return result == null ? Set.of() : result;
+    }
+
+    private Set<String> maskEntries(MetaPermission perm, String key) {
+        Set<String> out = new HashSet<>();
+        JsonNode mask = perm.getFieldMask();
+        if (mask != null && mask.has(key) && mask.get(key).isArray()) {
+            mask.get(key).forEach(n -> out.add(n.asText()));
+        }
+        return out;
     }
 }

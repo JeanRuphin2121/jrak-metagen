@@ -6,28 +6,28 @@
 # =============================================================
 
 # ── Stage 1: Build ────────────────────────────────────────────
-FROM eclipse-temurin:21-jdk-alpine AS builder
+FROM maven:3.9-eclipse-temurin-21 AS builder
 
 WORKDIR /workspace
 
-# Copy Maven wrapper and POMs first (better layer caching)
-COPY mvnw .
-COPY .mvn/ .mvn/
+# Copy POMs first (better layer caching)
 COPY pom.xml .
 COPY metagen-core/pom.xml   metagen-core/pom.xml
 COPY metagen-engine/pom.xml metagen-engine/pom.xml
+COPY metagen-ai/pom.xml     metagen-ai/pom.xml
 COPY metagen-server/pom.xml metagen-server/pom.xml
 
 # Download dependencies (cached unless POMs change)
-RUN ./mvnw dependency:go-offline -q
+RUN mvn -B -q dependency:go-offline -DskipTests || true
 
 # Copy source code
 COPY metagen-core/src   metagen-core/src
 COPY metagen-engine/src metagen-engine/src
+COPY metagen-ai/src     metagen-ai/src
 COPY metagen-server/src metagen-server/src
 
 # Build — skip tests (CI runs them separately)
-RUN ./mvnw package -pl metagen-server -am -DskipTests -q
+RUN mvn -B -q package -pl metagen-server -am -DskipTests -q
 
 # Extract layered JAR for better Docker layer caching
 RUN java -Djarmode=layertools \

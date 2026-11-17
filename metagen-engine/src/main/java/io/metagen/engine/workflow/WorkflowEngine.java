@@ -1,12 +1,16 @@
 package io.metagen.engine.workflow;
 
 import io.metagen.core.domain.MetaEntity;
+import io.metagen.core.domain.MetaState;
 import io.metagen.core.domain.MetaTransition;
 import io.metagen.core.domain.MetaWorkflow;
-import io.metagen.core.repository.MetaEntityRepository;
-import io.metagen.core.repository.MetaWorkflowRepository;
 import io.metagen.engine.crud.DynamicCrudService;
 import io.metagen.engine.crud.DynamicQueryBuilder;
+import io.metagen.engine.expr.Condition;
+import io.metagen.engine.meta.EntityFieldResolver;
+import io.metagen.engine.meta.MetaModelService;
+import io.metagen.engine.rbac.Access;
+import io.metagen.engine.rbac.RbacEnforcer;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
@@ -14,198 +18,178 @@ import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.UUID;
 
 /**
- * Executes workflow state transitions for entity records.
+ * Executes workflow transitions on records.
  *
- * <h2>Transition execution steps</h2>
+ * <p>A transition goes through, in order:
  * <ol>
- *   <li>Load the entity and its workflow (with all states + transitions)</li>
- *   <li>Load the current record — read its {@code state} field</li>
- *   <li>Find the requested transition by id</li>
- *   <li>Verify the transition's {@code fromState} matches the current record state</li>
- *   <li>Check {@code requiredRole} against the user's roles</li>
- *   <li>Evaluate {@code conditionScript} (Groovy) — must return {@code true}</li>
- *   <li>Persist the new state ({@code UPDATE ... SET state = :newState})</li>
- *   <li>Execute {@code actionScript} (Groovy) — side effects, notifications, etc.</li>
- *   <li>Return the updated record</li>
+ *   <li>visibility — the record must be readable by the user (row filters apply);</li>
+ *   <li>state — the transition must start from the record's current state;</li>
+ *   <li>authorisation — the transition's required role, or WRITE access on the
+ *       entity when no role is required;</li>
+ *   <li>guard — the declarative {@link Condition}, evaluated on the record;</li>
+ *   <li>a compare-and-set state update (safe under concurrency);</li>
+ *   <li>a history entry, then the optional {@link WorkflowAction}.</li>
  * </ol>
- *
- * <h2>Script execution</h2>
- * <p>Groovy scripts receive a {@code record} binding (the current record map)
- * and a {@code context} binding (caller-supplied extra data).
- * Scripts run in a sandbox — Spring beans are not directly accessible from
- * scripts (use action hooks for service calls).</p>
- *
- * <p>In Phase 2 the scripting sandbox is minimal. A full Groovy sandbox with
- * class whitelisting will be added in Phase 3.</p>
+ * Everything runs in one transaction: a failing action cancels the transition.
+ * A guard that cannot be evaluated is an error, never a silent "false".
  */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class WorkflowEngine {
 
-    private final MetaEntityRepository       metaEntityRepository;
-    private final MetaWorkflowRepository     workflowRepository;
+    private final MetaModelService           metaModel;
     private final NamedParameterJdbcTemplate jdbc;
-    private final DynamicCrudService         crudService;
+    private final DynamicCrudService         crud;
     private final DynamicQueryBuilder        queryBuilder;
+    private final RbacEnforcer               rbac;
+    private final WorkflowActionRegistry     actions;
 
-    /**
-     * Executes the requested transition.
-     *
-     * @param request all data needed to trigger the transition
-     * @return the updated record with the new state
-     * @throws NoSuchElementException if entity, record, or transition is not found
-     * @throws IllegalStateException  if the transition cannot be executed
-     *                                (wrong current state, role check, condition failed)
-     */
     @Transactional
     public TransitionResult execute(TransitionRequest request) {
-        // 1. Load entity + workflow
-        MetaEntity entity = metaEntityRepository.findByNameWithAll(request.entityName())
-            .orElseThrow(() -> new NoSuchElementException("Unknown entity: " + request.entityName()));
+        MetaEntity   entity   = metaModel.entity(request.entityName());
+        MetaWorkflow workflow = requireWorkflow(entity);
+        rbac.assertAllowed(request.userRoles(), entity, Access.READ);
 
-        MetaWorkflow workflow = entity.getWorkflow();
-        if (workflow == null) {
-            throw new IllegalStateException(
-                "Entity '" + request.entityName() + "' has no workflow attached");
-        }
+        Map<String, Object> record = crud.loadRaw(
+            entity, request.recordId(), request.userRoles(), request.username(), Access.READ);
+        String storedState  = (String) record.get("state");
+        String currentState = effectiveState(workflow, storedState);
 
-        // Full load with transitions
-        workflow = workflowRepository.findByIdWithAll(workflow.getId())
-            .orElseThrow(() -> new NoSuchElementException("Workflow not found"));
-
-        // 2. Load the current record (bypasses RBAC for internal engine use)
-        Map<String, Object> record = loadRaw(entity, request.recordId());
-        String currentState = (String) record.get("state");
-
-        // 3. Find the requested transition
         MetaTransition transition = workflow.getTransitions().stream()
             .filter(t -> t.getId().equals(request.transitionId()))
             .findFirst()
             .orElseThrow(() -> new NoSuchElementException(
-                "Transition " + request.transitionId() + " not found in workflow"));
+                "Transition " + request.transitionId() + " not found in workflow '"
+                + workflow.getName() + "'"));
 
-        // 4. Verify fromState matches current record state
-        String fromStateName = transition.getFromState().getName();
-        if (!fromStateName.equals(currentState)) {
+        if (!transition.getFromState().getName().equals(currentState)) {
             throw new IllegalStateException(
-                "Cannot execute transition '" + transition.getLabel() +
-                "': record is in state '" + currentState +
-                "' but transition requires '" + fromStateName + "'");
+                "Cannot apply '" + transition.getLabel() + "': the record is in state '"
+                + currentState + "', not '" + transition.getFromState().getName() + "'");
         }
-
-        // 5. Role check
-        String requiredRole = transition.getRequiredRole();
-        if (requiredRole != null && !request.userRoles().contains(requiredRole)
-                                 && !request.userRoles().contains("ADMIN")) {
+        if (!isAuthorised(transition, entity, request.userRoles())) {
+            throw new SecurityException(
+                "You are not allowed to apply '" + transition.getLabel() + "'");
+        }
+        Condition guard = Condition.parse(transition.getCondition());
+        if (guard != null && !guard.test(record, new EntityFieldResolver(entity),
+                                         DynamicCrudService.variables(request.username()))) {
             throw new IllegalStateException(
-                "Role '" + requiredRole + "' is required to execute transition '" +
-                transition.getLabel() + "'");
+                "The conditions for '" + transition.getLabel() + "' are not met");
         }
+        actions.requireKnown(transition.getActionName());
 
-        // 6. Evaluate condition script
-        if (transition.getConditionScript() != null && !transition.getConditionScript().isBlank()) {
-            boolean conditionMet = evaluateCondition(transition.getConditionScript(), record, request);
-            if (!conditionMet) {
-                throw new IllegalStateException(
-                    "Transition '" + transition.getLabel() + "' condition not met");
-            }
-        }
-
-        // 7. Persist new state
         String newState = transition.getToState().getName();
-        var params = new MapSqlParameterSource()
-            .addValue("newState",   newState)
-            .addValue("updatedBy",  request.username())
-            .addValue("id",         request.recordId());
-
-        Map<String, Object> updated = jdbc.queryForMap(
-            queryBuilder.buildStateUpdate(entity), params);
-
-        log.info("Workflow transition: {}/{} {} → {} by {}",
-                 request.entityName(), request.recordId(),
-                 currentState, newState, request.username());
-
-        // 8. Execute action script (async-safe, errors are logged not thrown)
-        if (transition.getActionScript() != null && !transition.getActionScript().isBlank()) {
-            runActionScript(transition.getActionScript(), updated, request);
+        List<Map<String, Object>> updated = jdbc.queryForList(
+            queryBuilder.buildStateUpdate(entity),
+            new MapSqlParameterSource()
+                .addValue("newState", newState)
+                .addValue("expectedState", storedState)
+                .addValue("updatedBy", entity.isAuditable() ? request.username() : null)
+                .addValue("id", request.recordId()));
+        if (updated.isEmpty()) {
+            throw new IllegalStateException(
+                "The record was modified by someone else — reload it and retry");
         }
 
-        return new TransitionResult(
-            request.entityName(),
-            request.recordId(),
-            currentState,
-            newState,
+        jdbc.update("""
+            INSERT INTO workflow_history
+                (entity_name, record_id, from_state, to_state, transition_label, username, comment)
+            VALUES (:entity, :recordId, :fromState, :toState, :label, :username, :comment)
+            """, new MapSqlParameterSource()
+                .addValue("entity", entity.getName())
+                .addValue("recordId", request.recordId())
+                .addValue("fromState", currentState)
+                .addValue("toState", newState)
+                .addValue("label", transition.getLabel())
+                .addValue("username", request.username())
+                .addValue("comment", blankToNull(request.comment())));
+
+        Map<String, Object> stored = updated.get(0);
+        if (transition.getActionName() != null && !transition.getActionName().isBlank()) {
+            actions.find(transition.getActionName()).orElseThrow().execute(new TransitionContext(
+                entity, request.recordId(), stored, currentState, newState,
+                transition.getLabel(), request.username(), request.comment()));
+        }
+
+        log.info("Workflow transition: {}/{} {} -> {} by {}",
+                 entity.getName(), request.recordId(), currentState, newState, request.username());
+
+        return new TransitionResult(entity.getName(), request.recordId(), currentState, newState,
             transition.getLabel(),
-            updated
-        );
+            rbac.applyFieldMask(crud.toApi(stored), request.userRoles(), entity));
     }
 
-    // ── Script execution ─────────────────────────────────────────────
+    /** Transitions the user could trigger now: right state, right role, guard satisfied. */
+    @Transactional(readOnly = true)
+    public List<AvailableTransition> available(String entityName, UUID recordId,
+                                               List<String> roles, String username) {
+        MetaEntity entity = metaModel.entity(entityName);
+        if (entity.getWorkflow() == null) return List.of();
+        rbac.assertAllowed(roles, entity, Access.READ);
 
-    /**
-     * Evaluates a Groovy condition script.
-     *
-     * <p>The script receives two bindings:</p>
-     * <ul>
-     *   <li>{@code record}  — the current record as a {@code Map<String, Object>}</li>
-     *   <li>{@code context} — caller-supplied extra data as a {@code Map<String, Object>}</li>
-     * </ul>
-     * Must return a {@code Boolean}. Any exception or non-boolean is treated as {@code false}.
-     */
-    private boolean evaluateCondition(String script,
-                                       Map<String, Object> record,
-                                       TransitionRequest request) {
-        try {
-            var shell    = buildGroovyShell(record, request);
-            Object result = shell.evaluate(script);
-            return Boolean.TRUE.equals(result);
-        } catch (Exception e) {
-            log.warn("Condition script evaluation failed: {}", e.getMessage());
-            return false;
+        Map<String, Object> record = crud.loadRaw(entity, recordId, roles, username, Access.READ);
+        String currentState = effectiveState(entity.getWorkflow(), (String) record.get("state"));
+        var resolver  = new EntityFieldResolver(entity);
+        var variables = DynamicCrudService.variables(username);
+
+        return entity.getWorkflow().getTransitions().stream()
+            .filter(t -> t.getFromState().getName().equals(currentState))
+            .filter(t -> isAuthorised(t, entity, roles))
+            .filter(t -> {
+                Condition guard = Condition.parse(t.getCondition());
+                return guard == null || guard.test(record, resolver, variables);
+            })
+            .sorted((a, b) -> Integer.compare(a.getToState().getPosition(), b.getToState().getPosition()))
+            .map(t -> new AvailableTransition(t.getId(), t.getLabel(),
+                                              t.getToState().getName(), t.getToState().getLabel()))
+            .toList();
+    }
+
+    @Transactional(readOnly = true)
+    public List<Map<String, Object>> history(String entityName, UUID recordId,
+                                             List<String> roles, String username) {
+        MetaEntity entity = metaModel.entity(entityName);
+        rbac.assertAllowed(roles, entity, Access.READ);
+        crud.loadRaw(entity, recordId, roles, username, Access.READ);   // visibility check
+        return jdbc.queryForList("""
+            SELECT from_state, to_state, transition_label, username, comment, created_at
+            FROM workflow_history
+            WHERE entity_name = :entity AND record_id = :recordId
+            ORDER BY created_at, id
+            """, new MapSqlParameterSource("entity", entity.getName()).addValue("recordId", recordId));
+    }
+
+    // ── Internals ─────────────────────────────────────────────────────────
+
+    private MetaWorkflow requireWorkflow(MetaEntity entity) {
+        if (entity.getWorkflow() == null) {
+            throw new IllegalStateException("Entity '" + entity.getName() + "' has no workflow");
         }
+        return entity.getWorkflow();
     }
 
-    /**
-     * Executes a Groovy action script.
-     * Errors are caught and logged — action failures do not roll back the state change.
-     */
-    private void runActionScript(String script,
-                                  Map<String, Object> record,
-                                  TransitionRequest request) {
-        try {
-            var shell = buildGroovyShell(record, request);
-            shell.evaluate(script);
-        } catch (Exception e) {
-            log.error("Action script failed for transition on {}/{}: {}",
-                      request.entityName(), request.recordId(), e.getMessage());
-        }
+    /** Records created before a workflow was attached have no state: treat them as initial. */
+    private String effectiveState(MetaWorkflow workflow, String stored) {
+        if (stored != null) return stored;
+        return workflow.getInitialState().map(MetaState::getName).orElse(null);
     }
 
-    private groovy.lang.GroovyShell buildGroovyShell(Map<String, Object> record,
-                                                       TransitionRequest request) {
-        var binding = new groovy.lang.Binding();
-        binding.setVariable("record",  record);
-        binding.setVariable("context", request.context());
-        return new groovy.lang.GroovyShell(binding);
+    private boolean isAuthorised(MetaTransition transition, MetaEntity entity, List<String> roles) {
+        if (rbac.isAdmin(roles)) return true;
+        String required = transition.getRequiredRole();
+        if (required != null && !required.isBlank()) return roles.contains(required);
+        return rbac.isAllowed(roles, entity, Access.WRITE);
     }
 
-    // ── Helpers ──────────────────────────────────────────────────────
-
-    /** Loads a record directly, bypassing RBAC (used internally by the engine). */
-    private Map<String, Object> loadRaw(MetaEntity entity, UUID id) {
-        String sql = queryBuilder.buildSelectById(entity);
-        var params = new MapSqlParameterSource("id", id);
-        var rows = jdbc.queryForList(sql, params);
-        if (rows.isEmpty()) {
-            throw new NoSuchElementException(
-                entity.getName() + " with id=" + id + " not found");
-        }
-        return rows.getFirst();
+    private static String blankToNull(String s) {
+        return s == null || s.isBlank() ? null : s;
     }
 }

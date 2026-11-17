@@ -5,7 +5,7 @@
 | Tool | Version | Notes |
 |---|---|---|
 | Java | 21+ | Temurin recommended |
-| Maven | 3.9+ | Or use `./mvnw` (included) |
+| Maven | 3.9+ |  |
 | Docker | 24+ | For PostgreSQL |
 | Docker Compose | 2.20+ | Included with Docker Desktop |
 | Git | any | |
@@ -42,7 +42,7 @@ docker compose -f docker/docker-compose.dev.yml ps
 ## 3. Build the project
 
 ```bash
-./mvnw compile
+mvn compile
 ```
 
 ---
@@ -50,7 +50,7 @@ docker compose -f docker/docker-compose.dev.yml ps
 ## 4. Run the server
 
 ```bash
-./mvnw spring-boot:run -pl metagen-server
+mvn spring-boot:run -pl metagen-server
 ```
 
 On first startup:
@@ -74,10 +74,10 @@ Open [http://localhost:8080/swagger-ui.html](http://localhost:8080/swagger-ui.ht
 
 ```bash
 # Unit tests (all modules)
-./mvnw test
+mvn test
 
 # Integration tests (requires Docker for Testcontainers)
-./mvnw verify -pl metagen-server
+mvn verify -pl metagen-server
 ```
 
 ---
@@ -122,8 +122,8 @@ docker compose -f docker/docker-compose.dev.yml down
 docker compose -f docker/docker-compose.dev.yml down -v
 
 # View server logs
-./mvnw spring-boot:run -pl metagen-server | tee server.log
+mvn spring-boot:run -pl metagen-server | tee server.log
 
 # Check Flyway migration status
-./mvnw flyway:info -pl metagen-server
+mvn flyway:info -pl metagen-server
 ```

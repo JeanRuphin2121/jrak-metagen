@@ -43,10 +43,10 @@ jobs:
           cache: maven
 
       - name: Compile
-        run: ./mvnw compile -q
+        run: mvn compile -q
 
       - name: Unit Tests
-        run: ./mvnw test -pl metagen-core,metagen-engine --no-transfer-progress
+        run: mvn test -pl metagen-core,metagen-engine --no-transfer-progress
 
       - name: Upload Surefire Reports
         if: failure()
@@ -91,7 +91,7 @@ jobs:
           cache: maven
 
       - name: Integration Tests
-        run: ./mvnw verify -pl metagen-server --no-transfer-progress
+        run: mvn verify -pl metagen-server --no-transfer-progress
         env:
           SPRING_PROFILES_ACTIVE: test
           METAGEN_DB_URL:         jdbc:postgresql://localhost:5432/metagen_test

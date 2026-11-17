@@ -16,7 +16,14 @@ public interface MetaPermissionRepository extends JpaRepository<MetaPermission, 
 
     Optional<MetaPermission> findByRoleIdAndEntityId(UUID roleId, UUID entityId);
 
-    List<MetaPermission> findByEntityId(UUID entityId);
+    @Query("SELECT p FROM MetaPermission p JOIN FETCH p.role JOIN FETCH p.entity WHERE p.entity.id = :entityId")
+    List<MetaPermission> findByEntityId(@Param("entityId") UUID entityId);
+
+    @Query("SELECT p FROM MetaPermission p JOIN FETCH p.role JOIN FETCH p.entity WHERE p.role.id = :roleId")
+    List<MetaPermission> findByRoleId(@Param("roleId") UUID roleId);
+
+    @Query("SELECT p FROM MetaPermission p JOIN FETCH p.role r JOIN FETCH p.entity WHERE r.name IN :roleNames")
+    List<MetaPermission> findByRoleNames(@Param("roleNames") List<String> roleNames);
 
     /**
      * Fetch all permissions for a set of role names and a given entity name.

@@ -120,7 +120,7 @@ Authorization: **RBAC** evaluated per request:
 1. Extract roles from JWT claims
 2. Look up `MetaPermission` rows for `(role, entity)` pairs
 3. Check `canRead` / `canWrite` / `canDelete`
-4. Apply `rowFilterScript` as a SQL WHERE clause
+4. Compile the declarative `rowFilter` (JSON condition) into a parameterised WHERE fragment — on list, get, update, delete and transitions
 5. Apply `fieldMask` to hide or mark fields as readonly
 
 ---

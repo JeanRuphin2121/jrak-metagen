@@ -10,7 +10,9 @@ import org.hibernate.annotations.UpdateTimestamp;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -122,7 +124,7 @@ public class MetaEntity {
         fetch = FetchType.LAZY
     )
     @OrderBy("position ASC")
-    private List<MetaField> fields = new ArrayList<>();
+    private Set<MetaField> fields = new LinkedHashSet<>();
 
     /**
      * Relations declared on this entity (source side).
@@ -136,7 +138,7 @@ public class MetaEntity {
         orphanRemoval = true,
         fetch = FetchType.LAZY
     )
-    private List<MetaRelation> relations = new ArrayList<>();
+    private Set<MetaRelation> relations = new LinkedHashSet<>();
 
     /**
      * Optional workflow that drives the lifecycle of records.
@@ -156,7 +158,7 @@ public class MetaEntity {
         orphanRemoval = true,
         fetch = FetchType.LAZY
     )
-    private List<MetaView> views = new ArrayList<>();
+    private Set<MetaView> views = new LinkedHashSet<>();
 
     @CreationTimestamp
     @Column(name = "created_at", updatable = false, nullable = false)

@@ -38,6 +38,15 @@ spring:
     locations: classpath:db/migration
     baseline-on-migrate: false
 
+  # ── Spring AI — Anthropic provider (mapped from metagen.ai.* config) ──
+  ai:
+    anthropic:
+      api-key: ${ANTHROPIC_API_KEY:}
+      chat:
+        options:
+          model: ${METAGEN_AI_MODEL:claude-sonnet-4-6}
+          max-tokens: 4096
+
   # ── Security ───────────────────────────────────────────────
   security:
     # Configured programmatically in SecurityConfig.java
@@ -86,6 +95,7 @@ metagen:
     provider: claude
     model: ${METAGEN_AI_MODEL:claude-sonnet-4-6}
     api-key: ${ANTHROPIC_API_KEY:}
+
 
 ---
 # ── Dev profile ────────────────────────────────────────────────
