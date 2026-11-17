@@ -153,4 +153,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ## License
 
-Apache License 2.0 — see `LICENSE` (add the Apache-2.0 text before publishing).
+Apache License 2.0 — see [`LICENSE`](LICENSE).
