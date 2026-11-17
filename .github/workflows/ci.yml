@@ -90,21 +90,20 @@ jobs:
           distribution: temurin
           cache: maven
 
+       # -am builds the modules the server depends on (core, engine, ai) in the same run.
       - name: Integration Tests
-        run: mvn verify -pl metagen-server --no-transfer-progress
+        run: mvn verify -pl metagen-server -am --no-transfer-progress
         env:
-          SPRING_PROFILES_ACTIVE: test
-          METAGEN_DB_URL:         jdbc:postgresql://localhost:5432/metagen_test
-          METAGEN_DB_USER:        metagen
-          METAGEN_DB_PASSWORD:    metagen
-          METAGEN_JWT_SECRET:     test-secret-do-not-use-in-production-min32
+          METAGEN_TEST_DB_URL:      jdbc:postgresql://localhost:5432/metagen_test
+          METAGEN_TEST_DB_USER:     metagen
+          METAGEN_TEST_DB_PASSWORD: metagen
 
-      - name: Upload Failsafe Reports
+      - name: Upload Test Reports
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: failsafe-reports
-          path: "**/target/failsafe-reports/**"
+          name: test-reports
+          path: "**/target/surefire-reports/**"
 
 
   # ── Docker Build & Push (main only) ─────────────────────────
