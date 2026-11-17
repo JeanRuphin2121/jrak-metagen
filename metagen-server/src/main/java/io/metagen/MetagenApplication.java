@@ -17,7 +17,7 @@ import org.springframework.boot.context.properties.ConfigurationPropertiesScan;
  * <h2>Quick start</h2>
  * <pre>
  *   docker compose -f docker/docker-compose.dev.yml up -d
- *   ./mvnw spring-boot:run -pl metagen-server
+ *   mvn spring-boot:run -pl metagen-server
  * </pre>
  *
  * The Swagger UI is available at <a href="http://localhost:8080/swagger-ui.html">

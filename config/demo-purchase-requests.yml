@@ -1,0 +1,80 @@
+# Demo: purchase-request approval, with RBAC, row-level security and guarded transitions.
+#
+# Import (dry-run first):
+#   curl -X POST "http://localhost:8080/api/studio/config/import?dryRun=true" \
+#        -H "Authorization: Bearer $TOKEN" -H "Content-Type: text/plain" \
+#        --data-binary @config/demo-purchase-requests.yml
+#   ... then with deploy=true to create the tables.
+
+roles:
+  - name: REQUESTER
+    label: Requester
+    description: Creates purchase requests and sees only their own
+  - name: MANAGER
+    label: Manager
+    description: Approves requests up to 5 000
+  - name: DIRECTOR
+    label: Director
+    description: Approves any request
+
+workflows:
+  - name: purchase_flow
+    label: Purchase request flow
+    states:
+      - { name: DRAFT,     label: Draft,            initial: true, color: "#9CA3AF", position: 0 }
+      - { name: SUBMITTED, label: Submitted,        color: "#3B82F6", position: 1 }
+      - { name: APPROVED,  label: Approved,         terminal: true, color: "#10B981", position: 2 }
+      - { name: REJECTED,  label: Rejected,         terminal: true, color: "#EF4444", position: 3 }
+    transitions:
+      - { from: DRAFT,     to: SUBMITTED, label: Submit,  action: log_transition }
+      - from: SUBMITTED
+        to: APPROVED
+        label: Approve (manager)
+        requiredRole: MANAGER
+        condition: { field: amount, op: lte, value: 5000 }
+        action: log_transition
+      - { from: SUBMITTED, to: APPROVED, label: Approve (director), requiredRole: DIRECTOR, action: log_transition }
+      - { from: SUBMITTED, to: REJECTED, label: Reject (manager), requiredRole: MANAGER, action: log_transition }
+      - { from: SUBMITTED, to: REJECTED, label: Reject (director), requiredRole: DIRECTOR, action: log_transition }
+
+entities:
+  - name: supplier
+    label: Supplier
+    fields:
+      - { name: name,  label: Name,  type: STRING, required: true, unique: true, position: 0 }
+      - { name: email, label: Email, type: EMAIL, position: 1 }
+    permissions:
+      - { role: REQUESTER, canRead: true }
+      - { role: MANAGER,   canRead: true, canWrite: true }
+      - { role: DIRECTOR,  canRead: true, canWrite: true, canDelete: true }
+
+  - name: purchase_request
+    label: Purchase request
+    workflow: purchase_flow
+    fields:
+      - { name: title,    label: Title,    type: STRING,  required: true, position: 0 }
+      - { name: amount,   label: Amount,   type: DECIMAL, required: true, position: 1 }
+      - name: category
+        label: Category
+        type: ENUM
+        options: { values: [IT, OFFICE, TRAVEL, OTHER] }
+        position: 2
+      - name: supplier
+        label: Supplier
+        type: REFERENCE
+        options: { targetEntity: supplier }
+        position: 3
+      - { name: justification, label: Justification, type: TEXT, position: 4 }
+      - { name: internal_note, label: Internal note,  type: TEXT, position: 5 }
+    permissions:
+      # A requester sees and edits only the requests they created, and never the internal note.
+      - role: REQUESTER
+        canRead: true
+        canWrite: true
+        rowFilter: { field: created_by, op: eq, value: $user }
+        fieldMask: { hidden: [internal_note] }
+      - role: MANAGER
+        canRead: true
+        canWrite: true
+        fieldMask: { readonly: [title, amount] }
+      - { role: DIRECTOR, canRead: true, canWrite: true, canDelete: true }

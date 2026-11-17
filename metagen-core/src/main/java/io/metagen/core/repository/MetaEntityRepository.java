@@ -28,6 +28,8 @@ public interface MetaEntityRepository extends JpaRepository<MetaEntity, UUID> {
     boolean existsByName(String name);
     boolean existsByTableName(String tableName);
 
+    boolean existsByWorkflowId(UUID workflowId);
+
     /**
      * Fetch entity with its fields in a single query.
      * Use this when you need to render a form or build a CREATE TABLE statement.
@@ -47,11 +49,11 @@ public interface MetaEntityRepository extends JpaRepository<MetaEntity, UUID> {
     @Query("""
         SELECT DISTINCT e FROM MetaEntity e
         LEFT JOIN FETCH e.fields
-        LEFT JOIN FETCH e.relations r
-        LEFT JOIN FETCH r.targetEntity
         LEFT JOIN FETCH e.workflow w
         LEFT JOIN FETCH w.states
-        LEFT JOIN FETCH w.transitions
+        LEFT JOIN FETCH w.transitions t
+        LEFT JOIN FETCH t.fromState
+        LEFT JOIN FETCH t.toState
         WHERE e.name = :name
         """)
     Optional<MetaEntity> findByNameWithAll(@Param("name") String name);

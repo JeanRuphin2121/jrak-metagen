@@ -52,3 +52,10 @@ node_modules/
 dist/
 .next/
 .nuxt/
+
+# Local secrets
+metagen-server/config/
+
+# Archives
+*.tgz
+*.tar

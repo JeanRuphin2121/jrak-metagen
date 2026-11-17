@@ -3,9 +3,8 @@ package io.metagen.engine.deploy;
 import io.metagen.core.domain.MetaEntity;
 import io.metagen.core.domain.MetaField;
 import io.metagen.core.domain.MetaFieldType;
-import io.metagen.core.domain.MetaRelation;
-import io.metagen.core.domain.MetaRelationType;
-import io.metagen.engine.crud.DynamicCrudService;
+import io.metagen.engine.meta.MetaModelService;
+import io.metagen.engine.sql.SqlIdentifiers;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
@@ -14,255 +13,298 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Set;
-import java.util.stream.Collectors;
+import java.util.Map;
+
+import static io.metagen.engine.sql.SqlIdentifiers.quote;
 
 /**
- * Creates or migrates the {@code data_*} table for a {@link MetaEntity}.
+ * Brings a {@code data_*} table in line with its entity definition.
  *
- * <p>Calling {@link #deploy(MetaEntity)} is idempotent:</p>
+ * <p>Deployment is <strong>additive and idempotent</strong>: it creates the
+ * table, adds missing columns, unique indexes and foreign keys — and never
+ * drops or rewrites anything. Whatever it cannot reconcile safely (a column
+ * whose type changed, a column no longer in the model) is reported as a
+ * warning for a human to handle, instead of being silently ignored.
+ *
+ * <p>Design choices:
  * <ul>
- *   <li>If the table does not exist → {@code CREATE TABLE}</li>
- *   <li>If the table exists → {@code ALTER TABLE ADD COLUMN} for any new fields</li>
- *   <li>Columns are <strong>never removed</strong> — safe, non-destructive migration</li>
+ *   <li>all system columns exist on every table, whatever the entity flags,
+ *       so attaching a workflow or enabling soft-delete later needs no DDL;</li>
+ *   <li>business columns are nullable in the database — "required" is
+ *       enforced by the engine, which lets a required field be added to a
+ *       table that already holds rows;</li>
+ *   <li>uniqueness uses a partial index ignoring soft-deleted rows;</li>
+ *   <li>default values are applied by the engine at insert time, never
+ *       interpolated into DDL.</li>
  * </ul>
- *
- * <h2>Generated table structure</h2>
- * <pre>
- *   CREATE TABLE data_supplier (
- *     id          UUID        PRIMARY KEY,
- *     state       VARCHAR(100),            -- workflow state (if workflow attached)
- *     name        VARCHAR(255) NOT NULL,   -- from MetaField
- *     siret       VARCHAR(255) UNIQUE,
- *     created_at  TIMESTAMPTZ,             -- system column (if auditable)
- *     updated_at  TIMESTAMPTZ,
- *     created_by  VARCHAR(255),
- *     updated_by  VARCHAR(255),
- *     deleted_at  TIMESTAMPTZ              -- soft delete marker (if softDelete)
- *   );
- * </pre>
- *
- * <h2>Why not Flyway?</h2>
- * <p>Flyway manages the {@code meta_*} schema (known at build time).
- * {@code data_*} tables are created at runtime from user-defined metadata —
- * we cannot write Flyway migrations for schemas we don't know in advance.</p>
  */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class EntityDeployer {
 
+    private static final Map<String, String> SYSTEM_COLUMN_DDL = systemColumns();
+
     private final NamedParameterJdbcTemplate jdbc;
-    private final DynamicCrudService         crudService;
+    private final MetaModelService           metaModel;
 
-    // ── Public API ───────────────────────────────────────────────────
-
-    /**
-     * Deploys (creates or migrates) the data table for the given entity.
-     *
-     * @param entity entity with fields fully loaded
-     * @return a human-readable summary of what was done
-     */
     @Transactional
     public DeployResult deploy(MetaEntity entity) {
-        String table = entity.getTableName();
+        String table = SqlIdentifiers.require(entity.getTableName());
+        var added    = new ArrayList<String>();
+        var warnings = new ArrayList<String>();
 
-        if (tableExists(table)) {
-            return migrate(entity);
+        boolean existed = tableExists(table);
+        if (!existed) {
+            String ddl = buildCreateTable(entity);
+            log.info("Creating table '{}' for entity '{}'", table, entity.getName());
+            log.debug("DDL: {}", ddl);
+            jdbc.getJdbcTemplate().execute(ddl);
         } else {
-            return create(entity);
+            migrateColumns(entity, table, added, warnings);
         }
+        ensureUniqueIndexes(entity, table);
+        ensureForeignKeys(entity, table, warnings);
+
+        metaModel.evictAll();
+        return new DeployResult(entity.getName(), table,
+            existed ? DeployResult.Action.MIGRATED : DeployResult.Action.CREATED,
+            List.copyOf(added), List.copyOf(warnings));
     }
 
-    // ── CREATE ───────────────────────────────────────────────────────
-
-    private DeployResult create(MetaEntity entity) {
-        String sql = buildCreateTable(entity);
-        log.info("Creating table '{}' for entity '{}'", entity.getTableName(), entity.getName());
-        log.debug("DDL: {}", sql);
-        jdbc.getJdbcTemplate().execute(sql);
-
-        // Create foreign key constraints for REFERENCE fields
-        createForeignKeys(entity);
-
-        // Invalidate metadata cache
-        crudService.evictCache(entity.getName());
-
-        return new DeployResult(entity.getName(), entity.getTableName(),
-                                DeployResult.Action.CREATED, List.of());
-    }
-
-    // ── MIGRATE ──────────────────────────────────────────────────────
-
-    private DeployResult migrate(MetaEntity entity) {
-        Set<String> existing = existingColumns(entity.getTableName());
-        var added = new ArrayList<String>();
-
-        for (MetaField field : entity.getFields()) {
-            if (!existing.contains(field.getName())) {
-                String alterSql = "ALTER TABLE " + entity.getTableName() +
-                                  " ADD COLUMN IF NOT EXISTS " +
-                                  fieldColumnDef(field);
-                log.info("Adding column '{}' to '{}'", field.getName(), entity.getTableName());
-                jdbc.getJdbcTemplate().execute(alterSql);
-                added.add(field.getName());
-            }
+    /**
+     * Deploys several entities: tables first, then a second pass so foreign
+     * keys between entities resolve whatever the order of the list.
+     */
+    @Transactional
+    public List<DeployResult> deployAll(List<MetaEntity> entities) {
+        var results = new ArrayList<DeployResult>();
+        for (MetaEntity e : entities) results.add(deploy(e));
+        for (int i = 0; i < entities.size(); i++) {
+            var warnings = new ArrayList<String>();
+            ensureForeignKeys(entities.get(i), entities.get(i).getTableName(), warnings);
+            DeployResult first = results.get(i);
+            // Keep non-FK warnings from the first pass, FK warnings from the final pass.
+            var merged = new ArrayList<>(first.warnings().stream()
+                .filter(w -> !w.startsWith("Reference ")).toList());
+            merged.addAll(warnings);
+            results.set(i, new DeployResult(first.entityName(), first.tableName(),
+                first.action(), first.addedColumns(), List.copyOf(merged)));
         }
-
-        crudService.evictCache(entity.getName());
-        return new DeployResult(entity.getName(), entity.getTableName(),
-                                DeployResult.Action.MIGRATED, added);
+        return results;
     }
 
-    // ── DDL builders ─────────────────────────────────────────────────
+    // ── DDL ───────────────────────────────────────────────────────────────
 
-    private String buildCreateTable(MetaEntity entity) {
+    String buildCreateTable(MetaEntity entity) {
         var cols = new ArrayList<String>();
-
-        // Primary key
-        cols.add("id UUID PRIMARY KEY DEFAULT gen_random_uuid()");
-
-        // Workflow state column
-        if (entity.getWorkflow() != null) {
-            cols.add("state VARCHAR(100)");
-        }
-
-        // User-defined fields
+        SYSTEM_COLUMN_DDL.forEach((name, ddl) -> cols.add(quote(name) + " " + ddl));
         for (MetaField field : entity.getFields()) {
-            cols.add(fieldColumnDef(field));
+            cols.add(quote(field.getName()) + " " + toSqlType(field));
         }
-
-        // Auditing columns
-        if (entity.isAuditable()) {
-            cols.add("created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()");
-            cols.add("updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()");
-            cols.add("created_by VARCHAR(255)");
-            cols.add("updated_by VARCHAR(255)");
-        }
-
-        // Soft delete marker
-        if (entity.isSoftDelete()) {
-            cols.add("deleted_at TIMESTAMPTZ");
-        }
-
-        return "CREATE TABLE " + entity.getTableName() +
+        return "CREATE TABLE " + quote(entity.getTableName()) +
                " (\n  " + String.join(",\n  ", cols) + "\n)";
     }
 
-    /**
-     * Builds the column definition fragment for a single field.
-     * Example: {@code "name VARCHAR(255) NOT NULL"}
-     */
-    String fieldColumnDef(MetaField field) {
-        var sb = new StringBuilder();
-        sb.append(field.getName()).append(" ").append(toSqlType(field));
+    private void migrateColumns(MetaEntity entity, String table,
+                                List<String> added, List<String> warnings) {
+        Map<String, String> existing = existingColumns(table);
 
-        if (field.isRequired()) {
-            sb.append(" NOT NULL");
-        }
-        if (field.isUnique()) {
-            sb.append(" UNIQUE");
-        }
-        if (field.getDefaultValue() != null) {
-            sb.append(" DEFAULT '").append(field.getDefaultValue()).append("'");
-        }
-        return sb.toString();
-    }
+        SYSTEM_COLUMN_DDL.forEach((name, ddl) -> {
+            if (!existing.containsKey(name)) {
+                // A NOT NULL system column added to a populated table needs its default.
+                jdbc.getJdbcTemplate().execute(
+                    "ALTER TABLE " + quote(table) + " ADD COLUMN " + quote(name) + " " + ddl);
+                added.add(name);
+            }
+        });
 
-    /**
-     * Maps a {@link MetaFieldType} to a PostgreSQL column type.
-     * Decimal precision/scale and max string length are read from
-     * {@link MetaField#getOptions()} when present.
-     */
-    String toSqlType(MetaField field) {
-        return switch (field.getType()) {
-            case STRING                   -> maxLength(field, 255);
-            case TEXT, RICH_TEXT          -> "TEXT";
-            case EMAIL, URL, PHONE        -> "VARCHAR(255)";
-            case INTEGER                  -> "INTEGER";
-            case LONG                     -> "BIGINT";
-            case DECIMAL                  -> decimalType(field);
-            case BOOLEAN                  -> "BOOLEAN";
-            case DATE                     -> "DATE";
-            case TIME                     -> "TIME";
-            case DATETIME                 -> "TIMESTAMPTZ";
-            case FILE, IMAGE              -> "TEXT";   // path or URL
-            case JSON                     -> "JSONB";
-            case ENUM                     -> "VARCHAR(100)";
-            case MULTI_ENUM               -> "JSONB";
-            case REFERENCE                -> "UUID";   // FK added separately
-        };
-    }
-
-    private String maxLength(MetaField field, int defaultMax) {
-        if (field.getOptions() != null && field.getOptions().has("maxLength")) {
-            return "VARCHAR(" + field.getOptions().get("maxLength").asInt(defaultMax) + ")";
+        for (MetaField field : entity.getFields()) {
+            String name = field.getName();
+            String expected = toSqlType(field);
+            if (!existing.containsKey(name)) {
+                log.info("Adding column '{}' to '{}'", name, table);
+                jdbc.getJdbcTemplate().execute(
+                    "ALTER TABLE " + quote(table) + " ADD COLUMN " + quote(name) + " " + expected);
+                added.add(name);
+            } else if (!sameType(expected, existing.get(name))) {
+                warnings.add("Column '" + name + "' is " + existing.get(name)
+                    + " in the database but the model expects " + expected
+                    + " — not altered automatically, migrate it manually");
+            }
         }
-        return "VARCHAR(" + defaultMax + ")";
-    }
 
-    private String decimalType(MetaField field) {
-        int precision = 10, scale = 2;
-        if (field.getOptions() != null) {
-            if (field.getOptions().has("precision")) precision = field.getOptions().get("precision").asInt(10);
-            if (field.getOptions().has("scale"))     scale     = field.getOptions().get("scale").asInt(2);
-        }
-        return "NUMERIC(" + precision + ", " + scale + ")";
-    }
-
-    /** Creates FK constraints for REFERENCE fields after the table exists. */
-    private void createForeignKeys(MetaEntity entity) {
-        for (MetaRelation rel : entity.getRelations()) {
-            if (rel.getType() == MetaRelationType.MANY_TO_ONE ||
-                rel.getType() == MetaRelationType.ONE_TO_ONE) {
-                String fkSql = "ALTER TABLE " + entity.getTableName() +
-                               " ADD CONSTRAINT fk_" + entity.getName() + "_" + rel.getFieldName() +
-                               " FOREIGN KEY (" + rel.getFieldName() + "_id)" +
-                               " REFERENCES " + rel.getTargetEntity().getTableName() + "(id)";
-                try {
-                    jdbc.getJdbcTemplate().execute(fkSql);
-                } catch (Exception e) {
-                    log.warn("Could not create FK for relation '{}': {}", rel.getFieldName(), e.getMessage());
-                }
+        for (String column : existing.keySet()) {
+            boolean known = SqlIdentifiers.isSystemColumn(column)
+                || entity.getFields().stream().anyMatch(f -> f.getName().equals(column));
+            if (!known) {
+                warnings.add("Column '" + column + "' exists in the table but not in the model"
+                    + " — kept (deploy never drops data)");
             }
         }
     }
 
-    // ── Introspection helpers ─────────────────────────────────────────
+    private void ensureUniqueIndexes(MetaEntity entity, String table) {
+        for (MetaField field : entity.getFields()) {
+            if (!field.isUnique()) continue;
+            String index = indexName("uq", table, field.getName());
+            jdbc.getJdbcTemplate().execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS " + quote(index) +
+                " ON " + quote(table) + " (" + quote(field.getName()) + ")" +
+                " WHERE \"deleted_at\" IS NULL");
+        }
+    }
 
-    private boolean tableExists(String tableName) {
-        String sql = """
+    private void ensureForeignKeys(MetaEntity entity, String table, List<String> warnings) {
+        for (MetaField field : entity.getFields()) {
+            if (field.getType() != MetaFieldType.REFERENCE) continue;
+            String target = field.getOptions() != null && field.getOptions().hasNonNull("targetEntity")
+                ? field.getOptions().get("targetEntity").asText() : null;
+            if (target == null || !SqlIdentifiers.isSafe(target)) {
+                warnings.add("Reference '" + field.getName()
+                    + "' has no valid options.targetEntity — no foreign key created");
+                continue;
+            }
+            String targetTable = MetaEntity.defaultTableName(target);
+            if (!tableExists(targetTable)) {
+                warnings.add("Reference '" + field.getName() + "' targets '" + target
+                    + "', which is not deployed yet — foreign key skipped, redeploy afterwards");
+                continue;
+            }
+            String constraint = indexName("fk", table, field.getName());
+            if (constraintExists(table, constraint)) continue;
+            jdbc.getJdbcTemplate().execute(
+                "ALTER TABLE " + quote(table) + " ADD CONSTRAINT " + quote(constraint) +
+                " FOREIGN KEY (" + quote(field.getName()) + ")" +
+                " REFERENCES " + quote(targetTable) + " (\"id\")");
+        }
+    }
+
+    String toSqlType(MetaField field) {
+        switch (field.getType()) {
+            case STRING:     return "VARCHAR(" + intOption(field, "maxLength", 255, 1, 10_000) + ")";
+            case TEXT:
+            case RICH_TEXT:
+            case FILE:
+            case IMAGE:      return "TEXT";
+            case EMAIL:
+            case URL:
+            case PHONE:      return "VARCHAR(255)";
+            case INTEGER:    return "INTEGER";
+            case LONG:       return "BIGINT";
+            case DECIMAL: {
+                int precision = intOption(field, "precision", 12, 1, 38);
+                int scale     = intOption(field, "scale", 2, 0, precision);
+                return "NUMERIC(" + precision + ", " + scale + ")";
+            }
+            case BOOLEAN:    return "BOOLEAN";
+            case DATE:       return "DATE";
+            case TIME:       return "TIME";
+            case DATETIME:   return "TIMESTAMPTZ";
+            case JSON:
+            case MULTI_ENUM: return "JSONB";
+            case ENUM:       return "VARCHAR(100)";
+            case REFERENCE:  return "UUID";
+            default: throw new IllegalStateException("Unsupported field type " + field.getType());
+        }
+    }
+
+    /** Options are numbers read from JSON and clamped — never spliced in as text. */
+    private int intOption(MetaField field, String key, int fallback, int min, int max) {
+        int value = fallback;
+        if (field.getOptions() != null && field.getOptions().has(key)) {
+            value = field.getOptions().get(key).asInt(fallback);
+        }
+        return Math.max(min, Math.min(max, value));
+    }
+
+    // ── Catalog lookups ───────────────────────────────────────────────────
+
+    private boolean tableExists(String table) {
+        Integer count = jdbc.queryForObject("""
             SELECT COUNT(*) FROM information_schema.tables
-            WHERE table_schema = 'public' AND table_name = :name
-            """;
-        Integer count = jdbc.queryForObject(sql, new MapSqlParameterSource("name", tableName), Integer.class);
+            WHERE table_schema = current_schema() AND table_name = :name
+            """, new MapSqlParameterSource("name", table), Integer.class);
         return count != null && count > 0;
     }
 
-    private Set<String> existingColumns(String tableName) {
-        String sql = """
-            SELECT column_name FROM information_schema.columns
-            WHERE table_schema = 'public' AND table_name = :name
-            """;
-        return jdbc.queryForList(sql, new MapSqlParameterSource("name", tableName), String.class)
-                   .stream().collect(Collectors.toSet());
+    private boolean constraintExists(String table, String constraint) {
+        Integer count = jdbc.queryForObject("""
+            SELECT COUNT(*) FROM information_schema.table_constraints
+            WHERE table_schema = current_schema() AND table_name = :table AND constraint_name = :name
+            """, new MapSqlParameterSource("table", table).addValue("name", constraint), Integer.class);
+        return count != null && count > 0;
     }
 
-    // ── Result DTO ───────────────────────────────────────────────────
+    /** Column name → normalised type description, e.g. {@code VARCHAR(255)}. */
+    private Map<String, String> existingColumns(String table) {
+        var out = new LinkedHashMap<String, String>();
+        jdbc.query("""
+            SELECT column_name, udt_name, character_maximum_length, numeric_precision, numeric_scale
+            FROM information_schema.columns
+            WHERE table_schema = current_schema() AND table_name = :name
+            ORDER BY ordinal_position
+            """, new MapSqlParameterSource("name", table), rs -> {
+                String udt = rs.getString("udt_name");
+                String type;
+                switch (udt) {
+                    case "varchar":     type = "VARCHAR(" + rs.getInt("character_maximum_length") + ")"; break;
+                    case "numeric":     type = "NUMERIC(" + rs.getInt("numeric_precision") + ", "
+                                               + rs.getInt("numeric_scale") + ")"; break;
+                    case "int4":        type = "INTEGER"; break;
+                    case "int8":        type = "BIGINT"; break;
+                    case "bool":        type = "BOOLEAN"; break;
+                    case "timestamptz": type = "TIMESTAMPTZ"; break;
+                    default:            type = udt.toUpperCase();
+                }
+                out.put(rs.getString("column_name"), type);
+            });
+        return out;
+    }
+
+    private boolean sameType(String expected, String actual) {
+        return expected.replace(" ", "").equalsIgnoreCase(actual.replace(" ", ""));
+    }
+
+    /** PostgreSQL truncates identifiers at 63 characters; keep ours unique below that. */
+    private String indexName(String prefix, String table, String column) {
+        String name = prefix + "_" + table + "_" + column;
+        if (name.length() <= 63) return name;
+        return name.substring(0, 54) + "_" + Integer.toHexString(name.hashCode());
+    }
+
+    private static Map<String, String> systemColumns() {
+        var m = new LinkedHashMap<String, String>();
+        m.put("id",         "UUID PRIMARY KEY");
+        m.put("state",      "VARCHAR(100)");
+        m.put("created_at", "TIMESTAMPTZ NOT NULL DEFAULT NOW()");
+        m.put("updated_at", "TIMESTAMPTZ NOT NULL DEFAULT NOW()");
+        m.put("created_by", "VARCHAR(255)");
+        m.put("updated_by", "VARCHAR(255)");
+        m.put("deleted_at", "TIMESTAMPTZ");
+        return m;
+    }
+
+    // ── Result ────────────────────────────────────────────────────────────
 
     public record DeployResult(
         String       entityName,
         String       tableName,
         Action       action,
-        List<String> addedColumns
+        List<String> addedColumns,
+        List<String> warnings
     ) {
         public enum Action { CREATED, MIGRATED }
 
         public String summary() {
-            return action == Action.CREATED
-                ? "Table '" + tableName + "' created for entity '" + entityName + "'"
-                : "Table '" + tableName + "' migrated — added columns: " + addedColumns;
+            String base = action == Action.CREATED
+                ? "Table '" + tableName + "' created"
+                : addedColumns.isEmpty()
+                    ? "Table '" + tableName + "' already up to date"
+                    : "Table '" + tableName + "' migrated — added columns: " + addedColumns;
+            return warnings.isEmpty() ? base : base + " (" + warnings.size() + " warning(s))";
         }
     }
 }

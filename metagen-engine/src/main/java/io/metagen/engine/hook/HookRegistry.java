@@ -27,50 +27,36 @@ import java.util.stream.Collectors;
 @Component
 public class HookRegistry {
 
-    /** Map of entity name → hooks sorted by order(). */
-    private final Map<String, List<PreSaveHook>> preSaveHooks;
+    private final Map<String, List<PreSaveHook>>  preSaveHooks;
+    private final Map<String, List<PostSaveHook>> postSaveHooks;
 
-    public HookRegistry(List<PreSaveHook> allHooks) {
-        this.preSaveHooks = allHooks.stream()
+    public HookRegistry(List<PreSaveHook> preHooks, List<PostSaveHook> postHooks) {
+        this.preSaveHooks = preHooks.stream()
             .sorted(Comparator.comparingInt(PreSaveHook::order))
             .collect(Collectors.groupingBy(PreSaveHook::entityName));
+        this.postSaveHooks = postHooks.stream()
+            .sorted(Comparator.comparingInt(PostSaveHook::order))
+            .collect(Collectors.groupingBy(PostSaveHook::entityName));
 
-        if (!allHooks.isEmpty()) {
-            log.info("Registered {} pre-save hook(s): {}",
-                allHooks.size(),
-                allHooks.stream()
-                    .map(h -> h.entityName() + "/" + h.getClass().getSimpleName())
-                    .toList());
+        if (!preHooks.isEmpty() || !postHooks.isEmpty()) {
+            log.info("Registered {} pre-save and {} post-save hook(s)", preHooks.size(), postHooks.size());
         }
     }
 
-    /**
-     * Executes all pre-save hooks registered for the entity in {@code ctx}.
-     * Stops early if a hook aborts the operation.
-     *
-     * @param ctx mutable hook context (errors and record modifications accumulate here)
-     */
+    /** Runs pre-save hooks in order; stops at the first one that aborts. */
     public void executePreSave(HookContext ctx) {
-        String entity = ctx.getEntity().getName();
-        List<PreSaveHook> hooks = preSaveHooks.getOrDefault(entity, List.of());
-
-        for (PreSaveHook hook : hooks) {
-            if (ctx.isAborted()) {
-                log.debug("Hook chain aborted before '{}' for entity '{}'",
-                          hook.getClass().getSimpleName(), entity);
-                break;
-            }
-            log.debug("Executing pre-save hook '{}' for entity '{}'",
-                      hook.getClass().getSimpleName(), entity);
+        for (PreSaveHook hook : preSaveHooks.getOrDefault(ctx.getEntity().getName(), List.of())) {
+            if (ctx.isAborted()) break;
+            log.debug("Pre-save hook '{}' on '{}'", hook.getClass().getSimpleName(), ctx.getEntity().getName());
             hook.execute(ctx);
         }
     }
 
-    /**
-     * Post-save notification — currently logs only.
-     * Will be extended in Phase 3 to support async event hooks.
-     */
+    /** Runs post-save hooks in order, inside the write transaction. */
     public void executePostSave(HookContext ctx) {
-        log.debug("Post-save for entity '{}' op={}", ctx.getEntity().getName(), ctx.getOperation());
+        for (PostSaveHook hook : postSaveHooks.getOrDefault(ctx.getEntity().getName(), List.of())) {
+            log.debug("Post-save hook '{}' on '{}'", hook.getClass().getSimpleName(), ctx.getEntity().getName());
+            hook.execute(ctx);
+        }
     }
 }

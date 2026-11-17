@@ -91,12 +91,13 @@ public class MetaPermission {
     private boolean canDelete = false;
 
     /**
-     * Optional Groovy expression that returns a SQL WHERE clause fragment.
-     * Applied automatically to every SELECT for this role + entity pair.
+     * Optional declarative row filter (JSON, see {@code io.metagen.engine.expr.Condition}),
+     * e.g. {@code {"field":"created_by","op":"eq","value":"$user"}}.
+     * Compiled to a parameterised SQL WHERE fragment — never concatenated raw.
      * {@code null} means no row-level restriction.
      */
-    @Column(name = "row_filter_script", columnDefinition = "TEXT")
-    private String rowFilterScript;
+    @Column(name = "row_filter", columnDefinition = "TEXT")
+    private String rowFilter;
 
     /**
      * Optional JSONB config for field-level masking.

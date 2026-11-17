@@ -8,20 +8,12 @@ import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 
 /**
- * Request body for adding or updating a field on an entity.
+ * Request to add a field to an entity.
  *
- * @param name         snake_case technical name (e.g. {@code first_name})
- * @param label        human-readable label (e.g. {@code Prénom})
- * @param type         field data type
- * @param required     whether the field is mandatory on save
- * @param unique       whether a UNIQUE constraint should be added
- * @param searchable   whether the field is included in free-text search
- * @param defaultValue default value expression
- * @param options      type-specific JSON config (enum values, precision, reference, ...)
- * @param position     display order (0-based)
+ * <p>{@code searchable} defaults to {@code true} when omitted. {@code position}
+ * is optional: a missing position appends the field at the end.
  */
 public record CreateFieldRequest(
-
     @NotBlank
     @Size(max = 100)
     @Pattern(regexp = "^[a-z][a-z0-9_]*$", message = "name must be snake_case")
@@ -34,10 +26,19 @@ public record CreateFieldRequest(
     MetaFieldType type,
 
     boolean required,
+
     boolean unique,
-    boolean searchable,
+
+    Boolean searchable,
 
     String   defaultValue,
+
+    /** Type-specific settings: maxLength, precision/scale, values (ENUM), targetEntity (REFERENCE). */
     JsonNode options,
-    int      position
-) {}
+
+    Integer  position
+) {
+    public CreateFieldRequest {
+        if (searchable == null) searchable = Boolean.TRUE;
+    }
+}

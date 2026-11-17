@@ -41,6 +41,14 @@ public class JwtService {
         @Value("${metagen.jwt.secret}") String secret,
         @Value("${metagen.jwt.expiration-ms:86400000}") long expirationMs
     ) {
+        if (secret == null || secret.getBytes(StandardCharsets.UTF_8).length < 32) {
+            throw new IllegalStateException(
+                "metagen.jwt.secret must be at least 32 characters — set METAGEN_JWT_SECRET");
+        }
+        if (secret.startsWith("change-this-secret")) {
+            log.warn("METAGEN_JWT_SECRET is the built-in default: anyone can forge tokens. "
+                   + "Set a private value before exposing this server.");
+        }
         this.secretKey    = Keys.hmacShaKeyFor(secret.getBytes(StandardCharsets.UTF_8));
         this.expirationMs = expirationMs;
     }

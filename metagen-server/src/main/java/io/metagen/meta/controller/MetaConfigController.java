@@ -3,7 +3,9 @@ package io.metagen.meta.controller;
 import io.metagen.ai.MetaProposal;
 import io.metagen.engine.config.MetaYamlDto;
 import io.metagen.engine.config.MetaYamlExporter;
+import io.metagen.engine.config.ImportResult;
 import io.metagen.engine.config.MetaYamlImporter;
+import io.metagen.meta.service.MetaEntityService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
@@ -13,6 +15,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -40,8 +43,12 @@ import java.util.Map;
 @Tag(name = "Studio API — Config", description = "Export / import configuration as YAML (ADMIN only)")
 public class MetaConfigController {
 
+    private static final com.fasterxml.jackson.databind.ObjectMapper MAPPER =
+        new com.fasterxml.jackson.databind.ObjectMapper();
+
     private final MetaYamlExporter exporter;
     private final MetaYamlImporter importer;
+    private final MetaEntityService entityService;
 
     @GetMapping(value = "/export", produces = "text/yaml")
     @Operation(
@@ -64,20 +71,26 @@ public class MetaConfigController {
     @PostMapping(value = "/import", consumes = "text/plain")
     @Operation(
         summary = "Import configuration from YAML",
-        description = "Upserts entities, workflows, roles, and permissions. Non-destructive — never deletes.")
-    public Map<String, Object> importConfig(@RequestBody String yaml) {
-        MetaYamlImporter.ImportResult result = importer.importYaml(yaml);
-        return result.toMap();
+        description = "Upserts entities, workflows, roles, and permissions. Non-destructive — never deletes. Use dryRun=true to validate without writing, deploy=true to create/alter tables afterwards.")
+    public Map<String, Object> importConfig(@RequestBody String yaml,
+                                            @RequestParam(defaultValue = "false") boolean dryRun,
+                                            @RequestParam(defaultValue = "false") boolean deploy) {
+        ImportResult result = importer.importYaml(yaml, dryRun);
+        Map<String, Object> out = new LinkedHashMap<>(result.toMap());
+        if (deploy && !dryRun) {
+            out.put("deployed", entityService.deployAll().stream().map(MetaEntityController::toMap).toList());
+        }
+        return out;
     }
 
     @PostMapping("/import-proposal")
     @Operation(
         summary = "Import an AI-generated proposal",
         description = "Converts a MetaProposal (from POST /api/ai/generate) into metadata. Non-destructive.")
-    public Map<String, Object> importProposal(@RequestBody MetaProposal proposal) {
+    public Map<String, Object> importProposal(@RequestBody MetaProposal proposal,
+                                              @RequestParam(defaultValue = "false") boolean dryRun) {
         MetaYamlDto dto = proposalToDto(proposal);
-        MetaYamlImporter.ImportResult result = importer.importDto(dto);
-        return result.toMap();
+        return importer.importDto(dto, dryRun).toMap();
     }
 
     // ── Conversion ────────────────────────────────────────────────────
@@ -145,7 +158,7 @@ public class MetaConfigController {
                 fy.setRequired(f.isRequired());
                 fy.setUnique(f.isUnique());
                 fy.setSearchable(f.isSearchable());
-                fy.setOptions(f.getOptions());
+                fy.setOptions(f.getOptions() == null ? null : MAPPER.valueToTree(f.getOptions()));
                 return fy;
             }).toList());
         }

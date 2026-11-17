@@ -9,7 +9,8 @@ import org.hibernate.annotations.CreationTimestamp;
 
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.List;
+import java.util.LinkedHashSet;
+import java.util.Set;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -83,7 +84,7 @@ public class MetaWorkflow {
         fetch = FetchType.LAZY
     )
     @OrderBy("position ASC")
-    private List<MetaState> states = new ArrayList<>();
+    private Set<MetaState> states = new LinkedHashSet<>();
 
     /**
      * Transitions between states.
@@ -97,7 +98,7 @@ public class MetaWorkflow {
         orphanRemoval = true,
         fetch = FetchType.LAZY
     )
-    private List<MetaTransition> transitions = new ArrayList<>();
+    private Set<MetaTransition> transitions = new LinkedHashSet<>();
 
     @CreationTimestamp
     @Column(name = "created_at", updatable = false, nullable = false)

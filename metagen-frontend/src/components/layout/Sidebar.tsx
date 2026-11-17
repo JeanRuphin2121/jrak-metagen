@@ -1,22 +1,26 @@
 import { NavLink, useNavigate } from 'react-router-dom'
-import { LayoutDashboard, Database, Table2, Sparkles, Users, LogOut } from 'lucide-react'
-import { logout, getCurrentUser, hasRole } from '@/lib/auth'
+import { LayoutDashboard, Database, Table2, Sparkles, Users, LogOut, FileCode } from 'lucide-react'
+import { logout, getCurrentUser } from '@/lib/auth'
+import { useMe, useRuntimeEntities } from '@/lib/runtime'
 import clsx from 'clsx'
 
 const navItems = [
-  { to: '/dashboard',       label: 'Dashboard',    icon: LayoutDashboard },
-  { to: '/studio/entities', label: 'Studio',        icon: Database },
-  { to: '/ai',              label: 'AI Assistant',  icon: Sparkles },
+  { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
 ]
 
 const adminItems = [
-  { to: '/admin/users', label: 'Users', icon: Users },
+  { to: '/studio/entities', label: 'Studio',        icon: Database },
+  { to: '/config',          label: 'Configuration', icon: FileCode },
+  { to: '/ai',              label: 'AI Assistant',  icon: Sparkles },
+  { to: '/admin/users',     label: 'Users',         icon: Users },
 ]
 
 export default function Sidebar() {
   const navigate = useNavigate()
   const user     = getCurrentUser()
-  const isAdmin  = hasRole('ADMIN')
+  const { data: me }       = useMe()
+  const { data: entities = [] } = useRuntimeEntities()
+  const isAdmin  = me?.admin ?? false
 
   function handleLogout() {
     logout()
@@ -39,6 +43,20 @@ export default function Sidebar() {
             {label}
           </NavLink>
         ))}
+
+        {entities.length > 0 && (
+          <>
+            <div className="pt-4 pb-1 px-2">
+              <p className="text-xs font-semibold uppercase tracking-wider text-gray-500">Applications</p>
+            </div>
+            {entities.map((e) => (
+              <NavLink key={e.name} to={`/data/${e.name}`} className={navClass}>
+                <Table2 size={17} />
+                {e.label}
+              </NavLink>
+            ))}
+          </>
+        )}
 
         {isAdmin && (
           <>

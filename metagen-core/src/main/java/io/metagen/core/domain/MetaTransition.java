@@ -80,19 +80,22 @@ public class MetaTransition {
     private String label;
 
     /**
-     * Optional Groovy script evaluated before the transition.
-     * Must return {@code true} for the transition to proceed.
+     * Optional declarative condition (JSON, see {@code io.metagen.engine.expr.Condition})
+     * evaluated against the record before the transition, e.g.
+     * {@code {"field":"amount","op":"lte","value":5000}}.
      * {@code null} means always allowed (subject to role check).
      */
-    @Column(name = "condition_script", columnDefinition = "TEXT")
-    private String conditionScript;
+    @Column(name = "condition_expr", columnDefinition = "TEXT")
+    private String condition;
 
     /**
-     * Optional Groovy script executed after the state change is persisted.
-     * Use for side effects: notifications, computed field updates, etc.
+     * Optional name of a {@code WorkflowAction} Spring bean executed in the same
+     * database transaction, right after the state change. A failing action rolls
+     * the transition back.
      */
-    @Column(name = "action_script", columnDefinition = "TEXT")
-    private String actionScript;
+    @Size(max = 100)
+    @Column(name = "action_name", length = 100)
+    private String actionName;
 
     /**
      * Role name required to trigger this transition.

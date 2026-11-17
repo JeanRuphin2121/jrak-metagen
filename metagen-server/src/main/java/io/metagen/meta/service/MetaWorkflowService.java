@@ -1,8 +1,15 @@
 package io.metagen.meta.service;
 
-import io.metagen.core.domain.*;
+import io.metagen.core.domain.MetaEntity;
+import io.metagen.core.domain.MetaTransition;
+import io.metagen.core.domain.MetaWorkflow;
 import io.metagen.core.repository.MetaEntityRepository;
 import io.metagen.core.repository.MetaWorkflowRepository;
+import io.metagen.engine.config.MetaYamlDto;
+import io.metagen.engine.config.MetaYamlImporter;
+import io.metagen.engine.expr.Condition;
+import io.metagen.engine.meta.EntityFieldResolver;
+import io.metagen.engine.meta.MetaModelService;
 import io.metagen.meta.dto.CreateWorkflowRequest;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -10,13 +17,14 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
-import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.UUID;
-import java.util.function.Function;
-import java.util.stream.Collectors;
 
-/** Business logic for managing workflow metadata in the Studio. */
+/**
+ * Studio-side management of workflows. Creation and update share the YAML
+ * importer's code path, so a workflow defined in the Studio is validated
+ * exactly like one defined in a configuration file.
+ */
 @Slf4j
 @Service
 @RequiredArgsConstructor
@@ -24,16 +32,22 @@ public class MetaWorkflowService {
 
     private final MetaWorkflowRepository workflowRepository;
     private final MetaEntityRepository   entityRepository;
+    private final MetaYamlImporter       importer;
+    private final MetaModelService       metaModel;
 
     @Transactional(readOnly = true)
     public List<MetaWorkflow> listAll() {
-        return workflowRepository.findAll();
+        return workflowRepository.findAll().stream()
+            .sorted((a, b) -> a.getName().compareTo(b.getName()))
+            .map(w -> getById(w.getId()))
+            .toList();
     }
 
     @Transactional(readOnly = true)
     public MetaWorkflow getByName(String name) {
-        return workflowRepository.findByName(name)
+        MetaWorkflow w = workflowRepository.findByName(name)
             .orElseThrow(() -> new NoSuchElementException("Workflow not found: " + name));
+        return getById(w.getId());
     }
 
     @Transactional(readOnly = true)
@@ -42,111 +56,85 @@ public class MetaWorkflowService {
             .orElseThrow(() -> new NoSuchElementException("Workflow not found: " + id));
     }
 
-    /**
-     * Creates a workflow with all its states and transitions in one transaction.
-     *
-     * <h2>Validation</h2>
-     * <ul>
-     *   <li>Exactly one state must have {@code initial = true}</li>
-     *   <li>All transition fromState/toState must reference declared state names</li>
-     * </ul>
-     */
     @Transactional
     public MetaWorkflow create(CreateWorkflowRequest req) {
         if (workflowRepository.existsByName(req.name())) {
             throw new IllegalArgumentException("Workflow '" + req.name() + "' already exists");
         }
-        validateStates(req);
-
-        MetaWorkflow workflow = MetaWorkflow.builder()
-            .name(req.name())
-            .label(req.label())
-            .description(req.description())
-            .build();
-
-        // Build states first — transitions reference them
-        Map<String, MetaState> statesByName = req.states().stream()
-            .map(dto -> {
-                var state = MetaState.builder()
-                    .name(dto.name())
-                    .label(dto.label())
-                    .initial(dto.initial())
-                    .terminal(dto.terminal())
-                    .color(dto.color())
-                    .position(dto.position())
-                    .build();
-                workflow.addState(state);
-                return state;
-            })
-            .collect(Collectors.toMap(MetaState::getName, Function.identity()));
-
-        // Save now so states get IDs before transitions reference them
-        MetaWorkflow saved = workflowRepository.save(workflow);
-
-        // Reload with IDs to wire transitions
-        Map<String, MetaState> persistedStates = saved.getStates().stream()
-            .collect(Collectors.toMap(MetaState::getName, Function.identity()));
-
-        if (req.transitions() != null) {
-            for (var dto : req.transitions()) {
-                MetaState from = persistedStates.get(dto.fromState());
-                MetaState to   = persistedStates.get(dto.toState());
-                if (from == null || to == null) {
-                    throw new IllegalArgumentException(
-                        "Transition references unknown state: " + dto.fromState() + " → " + dto.toState());
-                }
-                var transition = MetaTransition.builder()
-                    .fromState(from)
-                    .toState(to)
-                    .label(dto.label())
-                    .conditionScript(dto.conditionScript())
-                    .actionScript(dto.actionScript())
-                    .requiredRole(dto.requiredRole())
-                    .build();
-                saved.addTransition(transition);
-            }
-            saved = workflowRepository.save(saved);
-        }
-
-        log.info("Created workflow '{}' with {} states, {} transitions",
-                 saved.getName(),
-                 saved.getStates().size(),
-                 saved.getTransitions().size());
-        return saved;
+        return upsert(req);
     }
 
-    /**
-     * Attaches a workflow to an entity.
-     * Records already in progress keep their current state — no migration needed.
-     */
+    /** Creates the workflow or updates it in place (states and transitions are merged, never deleted). */
+    @Transactional
+    public MetaWorkflow upsert(CreateWorkflowRequest req) {
+        var dto = new MetaYamlDto();
+        dto.setWorkflows(List.of(toYaml(req)));
+        importer.importDto(dto, false);
+        log.info("Saved workflow '{}'", req.name());
+        return getByName(req.name());
+    }
+
     @Transactional
     public void attachToEntity(String workflowName, String entityName) {
         MetaWorkflow workflow = getByName(workflowName);
-        MetaEntity   entity   = entityRepository.findByName(entityName)
+        MetaEntity   entity   = entityRepository.findByNameWithAll(entityName)
             .orElseThrow(() -> new NoSuchElementException("Entity not found: " + entityName));
 
+        var resolver = new EntityFieldResolver(entity);
+        for (MetaTransition t : workflow.getTransitions()) {
+            Condition guard = Condition.parse(t.getCondition());
+            if (guard != null) {
+                try {
+                    guard.validate(resolver);
+                } catch (IllegalArgumentException e) {
+                    throw new IllegalArgumentException("Transition '" + t.getLabel()
+                        + "' cannot be used on '" + entityName + "': " + e.getMessage());
+                }
+            }
+        }
         entity.setWorkflow(workflow);
         entityRepository.save(entity);
+        metaModel.evictAll();
         log.info("Attached workflow '{}' to entity '{}'", workflowName, entityName);
     }
 
     @Transactional
     public void delete(String name) {
         MetaWorkflow workflow = getByName(name);
+        if (entityRepository.existsByWorkflowId(workflow.getId())) {
+            throw new IllegalStateException(
+                "Workflow '" + name + "' is attached to at least one entity — detach it first");
+        }
         workflowRepository.delete(workflow);
+        metaModel.evictAll();
         log.info("Deleted workflow '{}'", name);
     }
 
-    // ── Validation ────────────────────────────────────────────────────
-
-    private void validateStates(CreateWorkflowRequest req) {
-        if (req.states() == null || req.states().isEmpty()) {
-            throw new IllegalArgumentException("A workflow must have at least one state");
-        }
-        long initialCount = req.states().stream().filter(CreateWorkflowRequest.StateDto::initial).count();
-        if (initialCount != 1) {
-            throw new IllegalArgumentException(
-                "A workflow must have exactly one initial state (found " + initialCount + ")");
-        }
+    private MetaYamlDto.WorkflowYaml toYaml(CreateWorkflowRequest req) {
+        var y = new MetaYamlDto.WorkflowYaml();
+        y.setName(req.name());
+        y.setLabel(req.label());
+        y.setDescription(req.description());
+        y.setStates(req.states().stream().map(s -> {
+            var sy = new MetaYamlDto.StateYaml();
+            sy.setName(s.name());
+            sy.setLabel(s.label());
+            sy.setInitial(s.initial());
+            sy.setTerminal(s.terminal());
+            sy.setColor(s.color());
+            sy.setPosition(s.position());
+            return sy;
+        }).toList());
+        y.setTransitions(req.transitions().stream().map(t -> {
+            var ty = new MetaYamlDto.TransitionYaml();
+            ty.setFrom(t.fromState());
+            ty.setTo(t.toState());
+            ty.setLabel(t.label());
+            ty.setCondition(t.condition());
+            ty.setAction(t.action());
+            ty.setRequiredRole(t.requiredRole());
+            return ty;
+        }).toList());
+        return y;
     }
 }

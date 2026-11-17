@@ -3,262 +3,172 @@ package io.metagen.engine.crud;
 import io.metagen.core.domain.MetaEntity;
 import io.metagen.core.domain.MetaField;
 import io.metagen.core.domain.MetaFieldType;
+import io.metagen.engine.sql.SqlIdentifiers;
 import org.springframework.stereotype.Component;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
+
+import static io.metagen.engine.sql.SqlIdentifiers.quote;
 
 /**
- * Builds parameterised SQL statements from {@link MetaEntity} metadata.
+ * Builds the SQL statements executed on {@code data_*} tables.
  *
- * <h2>SQL injection prevention</h2>
+ * <p>Rules that make the output safe by construction:
  * <ul>
- *   <li>Column names come from validated {@link MetaField#getName()} values,
- *       constrained by the {@code ^[a-z][a-z0-9_]*$} pattern — safe to embed.</li>
- *   <li>Table names follow the same pattern via {@link MetaEntity#getTableName()}.</li>
- *   <li>User-supplied <em>values</em> are always passed as Spring named
- *       parameters ({@code :paramName}) — never string-interpolated.</li>
- *   <li>Sort field is validated against the entity's declared field list before
- *       embedding in the ORDER BY clause.</li>
+ *   <li>every identifier goes through {@link SqlIdentifiers#quote};</li>
+ *   <li>every value is a named bind parameter;</li>
+ *   <li>extra WHERE fragments are only ever produced by
+ *       {@code Condition.toSql}, never taken from metadata as text.</li>
  * </ul>
  *
- * <h2>Generated table structure</h2>
- * Every {@code data_*} table has these fixed system columns in addition to
- * the declared {@link MetaField fields}:
- * <ul>
- *   <li>{@code id}          — UUID primary key</li>
- *   <li>{@code created_at}  — set on INSERT (when auditable)</li>
- *   <li>{@code updated_at}  — set on UPDATE (when auditable)</li>
- *   <li>{@code created_by}  — set on INSERT (when auditable)</li>
- *   <li>{@code updated_by}  — set on UPDATE (when auditable)</li>
- *   <li>{@code deleted_at}  — set on soft DELETE (when softDelete)</li>
- * </ul>
+ * <p>Every data table carries the full set of system columns
+ * ({@link SqlIdentifiers#SYSTEM_COLUMNS}) regardless of the entity's flags, so
+ * the generated SQL does not depend on how the entity was configured when its
+ * table was first deployed.
  */
 @Component
 public class DynamicQueryBuilder {
 
-    // ── SELECT ───────────────────────────────────────────────────────
+    public String table(MetaEntity entity) {
+        return quote(entity.getTableName());
+    }
 
-    /**
-     * Builds a paginated SELECT with optional search, sort, and row filter.
-     *
-     * @param entity     the entity metadata
-     * @param rowFilter  SQL WHERE fragment from the RBAC engine (may be null)
-     * @param search     free-text search term (may be null)
-     * @param sortField  field name to sort by (validated against entity fields)
-     * @param sortDir    {@code "ASC"} or {@code "DESC"}
-     * @return SQL string with {@code :pageSize}, {@code :offset},
-     *         and optionally {@code :search} named parameters
-     */
+    /** {@code whereFragments} must come from {@code Condition.toSql}. */
     public String buildSelect(MetaEntity entity,
-                              String rowFilter,
-                              String search,
+                              List<String> whereFragments,
+                              boolean withSearch,
                               String sortField,
                               String sortDir) {
-        var sb = new StringBuilder();
-        sb.append("SELECT ").append(columnList(entity));
-        sb.append(" FROM ").append(entity.getTableName());
-        sb.append(" WHERE 1=1");
-
-        if (entity.isSoftDelete()) {
-            sb.append(" AND deleted_at IS NULL");
-        }
-        if (rowFilter != null && !rowFilter.isBlank()) {
-            sb.append(" AND (").append(rowFilter).append(")");
-        }
-        if (search != null && !search.isBlank()) {
-            sb.append(" AND (").append(buildSearchClause(entity)).append(")");
-        }
-
-        sb.append(" ORDER BY ").append(resolvedSortColumn(entity, sortField));
-        sb.append(" ").append("DESC".equalsIgnoreCase(sortDir) ? "DESC" : "ASC");
-        sb.append(" LIMIT :pageSize OFFSET :offset");
-        return sb.toString();
-    }
-
-    /** Builds the COUNT(*) query matching the same WHERE conditions. */
-    public String buildCount(MetaEntity entity, String rowFilter, String search) {
-        var sb = new StringBuilder();
-        sb.append("SELECT COUNT(*) FROM ").append(entity.getTableName());
-        sb.append(" WHERE 1=1");
-
-        if (entity.isSoftDelete()) {
-            sb.append(" AND deleted_at IS NULL");
-        }
-        if (rowFilter != null && !rowFilter.isBlank()) {
-            sb.append(" AND (").append(rowFilter).append(")");
-        }
-        if (search != null && !search.isBlank()) {
-            sb.append(" AND (").append(buildSearchClause(entity)).append(")");
-        }
-        return sb.toString();
-    }
-
-    /** Builds {@code SELECT ... FROM ... WHERE id = :id}. */
-    public String buildSelectById(MetaEntity entity) {
         return "SELECT " + columnList(entity) +
-               " FROM " + entity.getTableName() +
-               " WHERE id = :id" +
-               (entity.isSoftDelete() ? " AND deleted_at IS NULL" : "");
+               " FROM " + table(entity) +
+               where(entity, whereFragments, withSearch) +
+               " ORDER BY " + quote(resolvedSortColumn(entity, sortField)) +
+               ("ASC".equalsIgnoreCase(sortDir) ? " ASC" : " DESC") +
+               ", \"id\" ASC" +
+               " LIMIT :pageSize OFFSET :offset";
     }
 
-    // ── INSERT ───────────────────────────────────────────────────────
+    public String buildCount(MetaEntity entity, List<String> whereFragments, boolean withSearch) {
+        return "SELECT COUNT(*) FROM " + table(entity) + where(entity, whereFragments, withSearch);
+    }
 
-    /**
-     * Builds an INSERT statement for the given field names.
-     * System columns (id, created_at, created_by) are injected automatically.
-     *
-     * @param entity     entity metadata
-     * @param fieldNames declared fields present in the request body
-     * @return SQL with named parameters matching each field name
-     *         plus {@code :id}, {@code :createdBy}
-     */
+    public String buildSelectById(MetaEntity entity, List<String> whereFragments) {
+        var sb = new StringBuilder("SELECT " + columnList(entity) +
+                                   " FROM " + table(entity) +
+                                   " WHERE \"id\" = :id AND \"deleted_at\" IS NULL");
+        whereFragments.forEach(f -> sb.append(" AND ").append(f));
+        return sb.toString();
+    }
+
     public String buildInsert(MetaEntity entity, Collection<String> fieldNames) {
-        var cols = new ArrayList<String>();
-        var vals = new ArrayList<String>();
-
-        cols.add("id");         vals.add(":id");
-        cols.add("state");      vals.add(":state"); // workflow state
-
-        for (var name : fieldNames) {
-            validateFieldName(name, entity);
-            cols.add(name);
-            vals.add(":" + name);
+        var cols = new ArrayList<String>(List.of("\"id\"", "\"state\"", "\"created_by\"", "\"updated_by\""));
+        var vals = new ArrayList<String>(List.of(":id", ":state", ":createdBy", ":createdBy"));
+        for (String name : fieldNames) {
+            MetaField field = requireField(entity, name);
+            cols.add(quote(name));
+            vals.add(placeholder(field));
         }
-
-        if (entity.isAuditable()) {
-            cols.add("created_at");  vals.add("NOW()");
-            cols.add("updated_at");  vals.add("NOW()");
-            cols.add("created_by");  vals.add(":createdBy");
-            cols.add("updated_by");  vals.add(":createdBy");
-        }
-
-        return "INSERT INTO " + entity.getTableName() +
+        return "INSERT INTO " + table(entity) +
                " (" + String.join(", ", cols) + ")" +
                " VALUES (" + String.join(", ", vals) + ")" +
                " RETURNING " + columnList(entity);
     }
 
-    // ── UPDATE ───────────────────────────────────────────────────────
-
-    /**
-     * Builds an UPDATE statement for the given field names.
-     *
-     * @param entity     entity metadata
-     * @param fieldNames fields present in the request body (readonly fields
-     *                   must be filtered out by the RBAC layer before calling)
-     * @return SQL with named parameters
-     */
     public String buildUpdate(MetaEntity entity, Collection<String> fieldNames) {
-        var setClauses = new ArrayList<String>();
-
-        for (var name : fieldNames) {
-            validateFieldName(name, entity);
-            setClauses.add(name + " = :" + name);
+        var set = new ArrayList<String>();
+        for (String name : fieldNames) {
+            MetaField field = requireField(entity, name);
+            set.add(quote(name) + " = " + placeholder(field));
         }
-
-        if (entity.isAuditable()) {
-            setClauses.add("updated_at = NOW()");
-            setClauses.add("updated_by = :updatedBy");
-        }
-
-        return "UPDATE " + entity.getTableName() +
-               " SET " + String.join(", ", setClauses) +
-               " WHERE id = :id" +
+        set.add("\"updated_at\" = NOW()");
+        set.add("\"updated_by\" = :updatedBy");
+        return "UPDATE " + table(entity) +
+               " SET " + String.join(", ", set) +
+               " WHERE \"id\" = :id AND \"deleted_at\" IS NULL" +
                " RETURNING " + columnList(entity);
     }
 
-    // ── DELETE ───────────────────────────────────────────────────────
-
-    /** Soft delete — sets {@code deleted_at}. */
     public String buildSoftDelete(MetaEntity entity) {
-        return "UPDATE " + entity.getTableName() +
-               " SET deleted_at = NOW()" +
-               (entity.isAuditable() ? ", updated_by = :deletedBy" : "") +
-               " WHERE id = :id AND deleted_at IS NULL";
+        return "UPDATE " + table(entity) +
+               " SET \"deleted_at\" = NOW(), \"updated_at\" = NOW(), \"updated_by\" = :deletedBy" +
+               " WHERE \"id\" = :id AND \"deleted_at\" IS NULL";
     }
 
-    /** Hard delete — physically removes the row. */
     public String buildHardDelete(MetaEntity entity) {
-        return "DELETE FROM " + entity.getTableName() + " WHERE id = :id";
+        return "DELETE FROM " + table(entity) + " WHERE \"id\" = :id";
     }
-
-    // ── Workflow state update ─────────────────────────────────────────
-
-    /** Updates only the {@code state} column (used by the workflow engine). */
-    public String buildStateUpdate(MetaEntity entity) {
-        return "UPDATE " + entity.getTableName() +
-               " SET state = :newState" +
-               (entity.isAuditable() ? ", updated_at = NOW(), updated_by = :updatedBy" : "") +
-               " WHERE id = :id" +
-               " RETURNING " + columnList(entity);
-    }
-
-    // ── Helpers ──────────────────────────────────────────────────────
 
     /**
-     * Returns the comma-separated list of all readable columns for this entity.
-     * System columns (id, auditing, soft-delete) are included automatically.
+     * Compare-and-set on the state column: the update only applies if the record
+     * is still in the state the caller observed, which makes concurrent
+     * transitions on the same record safe.
      */
+    public String buildStateUpdate(MetaEntity entity) {
+        return "UPDATE " + table(entity) +
+               " SET \"state\" = :newState, \"updated_at\" = NOW(), \"updated_by\" = :updatedBy" +
+               " WHERE \"id\" = :id AND \"deleted_at\" IS NULL" +
+               " AND \"state\" IS NOT DISTINCT FROM CAST(:expectedState AS VARCHAR)" +
+               " RETURNING " + columnList(entity);
+    }
+
     public String columnList(MetaEntity entity) {
         var cols = new ArrayList<String>();
-        cols.add("id");
-        if (entity.getWorkflow() != null) {
-            cols.add("state");
-        }
-        entity.getFields().stream()
-              .map(MetaField::getName)
-              .forEach(cols::add);
-        if (entity.isAuditable()) {
-            cols.addAll(List.of("created_at", "updated_at", "created_by", "updated_by"));
-        }
-        if (entity.isSoftDelete()) {
-            cols.add("deleted_at");
-        }
+        SqlIdentifiers.SYSTEM_COLUMNS.forEach(c -> cols.add(quote(c)));
+        entity.getFields().forEach(f -> cols.add(quote(f.getName())));
         return String.join(", ", cols);
     }
 
-    /**
-     * Builds an ILIKE search clause across all searchable STRING/TEXT fields.
-     * Returns {@code "FALSE"} if no searchable text field exists.
-     */
-    private String buildSearchClause(MetaEntity entity) {
+    public boolean hasSearchableFields(MetaEntity entity) {
+        return entity.getFields().stream().anyMatch(this::isSearchable);
+    }
+
+    // ── Internals ─────────────────────────────────────────────────────────
+
+    private String where(MetaEntity entity, List<String> whereFragments, boolean withSearch) {
+        var sb = new StringBuilder(" WHERE \"deleted_at\" IS NULL");
+        whereFragments.forEach(f -> sb.append(" AND ").append(f));
+        if (withSearch) {
+            sb.append(" AND (").append(searchClause(entity)).append(")");
+        }
+        return sb.toString();
+    }
+
+    private String searchClause(MetaEntity entity) {
         var clauses = entity.getFields().stream()
-            .filter(MetaField::isSearchable)
-            .filter(f -> isTextType(f.getType()))
-            .map(f -> f.getName() + " ILIKE :search")
+            .filter(this::isSearchable)
+            .map(f -> quote(f.getName()) + " ILIKE :search")
             .toList();
         return clauses.isEmpty() ? "FALSE" : String.join(" OR ", clauses);
     }
 
-    private boolean isTextType(MetaFieldType type) {
-        return switch (type) {
-            case STRING, TEXT, RICH_TEXT, EMAIL, URL, PHONE -> true;
-            default -> false;
-        };
+    private boolean isSearchable(MetaField f) {
+        if (!f.isSearchable()) return false;
+        MetaFieldType t = f.getType();
+        return t == MetaFieldType.STRING || t == MetaFieldType.TEXT || t == MetaFieldType.RICH_TEXT
+            || t == MetaFieldType.EMAIL || t == MetaFieldType.URL || t == MetaFieldType.PHONE
+            || t == MetaFieldType.ENUM;
     }
 
-    /**
-     * Validates and returns the sort column name.
-     * Falls back to {@code created_at} for unknown fields to prevent injection.
-     */
+    /** Unknown or missing sort fields fall back to creation date — never to user input. */
     private String resolvedSortColumn(MetaEntity entity, String sortField) {
         if (sortField == null) return "created_at";
-        boolean valid = "id".equals(sortField) ||
-                        "created_at".equals(sortField) ||
-                        "updated_at".equals(sortField) ||
-                        entity.getFields().stream().anyMatch(f -> f.getName().equals(sortField));
+        boolean valid = SqlIdentifiers.isSystemColumn(sortField)
+            || entity.getFields().stream().anyMatch(f -> f.getName().equals(sortField));
         return valid ? sortField : "created_at";
     }
 
-    /**
-     * Throws if {@code name} is not a declared field name.
-     * Called before embedding any caller-supplied name into SQL.
-     */
-    void validateFieldName(String name, MetaEntity entity) {
-        boolean valid = entity.getFields().stream().anyMatch(f -> f.getName().equals(name));
-        if (!valid) {
-            throw new IllegalArgumentException(
-                "Field '" + name + "' does not exist on entity '" + entity.getName() + "'");
-        }
+    private String placeholder(MetaField field) {
+        String param = ":" + field.getName();
+        return ValueCoercer.isJsonType(field.getType()) ? "CAST(" + param + " AS jsonb)" : param;
+    }
+
+    MetaField requireField(MetaEntity entity, String name) {
+        return entity.getFields().stream()
+            .filter(f -> f.getName().equals(name))
+            .findFirst()
+            .orElseThrow(() -> new IllegalArgumentException(
+                "Field '" + name + "' does not exist on entity '" + entity.getName() + "'"));
     }
 }

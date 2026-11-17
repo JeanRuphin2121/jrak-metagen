@@ -1,40 +1,27 @@
 package io.metagen.engine.config;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
-import com.fasterxml.jackson.dataformat.yaml.YAMLGenerator;
-import io.metagen.core.domain.*;
-import io.metagen.core.repository.*;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import io.metagen.core.domain.MetaEntity;
+import io.metagen.core.domain.MetaRole;
+import io.metagen.core.repository.MetaEntityRepository;
+import io.metagen.core.repository.MetaPermissionRepository;
+import io.metagen.core.repository.MetaRoleRepository;
+import io.metagen.core.repository.MetaWorkflowRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.io.IOException;
-import java.io.StringWriter;
+import java.util.Comparator;
 import java.util.List;
+import java.util.NoSuchElementException;
 
 /**
- * Exports the full platform configuration to YAML.
+ * Exports the configuration as YAML.
  *
- * <h2>Why this matters</h2>
- * Simplicité stores config in a database — you can't {@code git diff} it,
- * review it in a PR, or roll it back with {@code git revert}.
- *
- * Metagen's YAML export gives you:
- * <ul>
- *   <li>Human-readable configuration files you can read without a DB client</li>
- *   <li>Git-versionnable history of every schema change</li>
- *   <li>PR reviews on entity/workflow/permission changes</li>
- *   <li>Reproducible environments: {@code metagen import} on a fresh DB</li>
- *   <li>Environment diff: {@code metagen diff prod staging}</li>
- * </ul>
- *
- * <h2>Usage</h2>
- * <pre>
- * GET /api/studio/config/export          → YAML string
- * GET /api/studio/config/export?pretty   → indented YAML
- * </pre>
+ * <p>Output is deterministic (everything sorted by name or position) so two
+ * exports of the same configuration are byte-identical and {@code git diff}
+ * shows only real changes.
  */
 @Slf4j
 @Service
@@ -46,92 +33,47 @@ public class MetaYamlExporter {
     private final MetaRoleRepository       roleRepository;
     private final MetaPermissionRepository permissionRepository;
 
-    private static final ObjectMapper YAML_MAPPER = new ObjectMapper(
-        new YAMLFactory()
-            .disable(YAMLGenerator.Feature.WRITE_DOC_START_MARKER)
-            .enable(YAMLGenerator.Feature.MINIMIZE_QUOTES)
-    );
-
-    // ── Export to string ─────────────────────────────────────────────
-
-    /**
-     * Exports the entire configuration as a YAML string.
-     *
-     * @return YAML string representing entities, workflows, and roles
-     */
     @Transactional(readOnly = true)
     public String exportAll() {
-        MetaYamlDto dto = buildDto();
-        try {
-            StringWriter writer = new StringWriter();
-            YAML_MAPPER.writerWithDefaultPrettyPrinter().writeValue(writer, dto);
-            return writer.toString();
-        } catch (IOException e) {
-            throw new RuntimeException("Failed to serialise config to YAML", e);
-        }
+        return write(buildDto());
     }
 
-    /**
-     * Exports a single entity (with its permissions) as a YAML string.
-     * Useful for per-entity config files.
-     */
+    @Transactional(readOnly = true)
+    public MetaYamlDto buildDto() {
+        var dto = new MetaYamlDto();
+        dto.setRoles(roleRepository.findByBuiltInFalse().stream()
+            .sorted(Comparator.comparing(MetaRole::getName))
+            .map(MetaYamlDto.RoleYaml::from).toList());
+        dto.setWorkflows(workflowRepository.findAll().stream()
+            .sorted(Comparator.comparing(w -> w.getName()))
+            .map(w -> workflowRepository.findByIdWithAll(w.getId()).orElseThrow())
+            .map(MetaYamlDto.WorkflowYaml::from).toList());
+        dto.setEntities(entityRepository.findAll().stream()
+            .sorted(Comparator.comparing(MetaEntity::getName))
+            .map(e -> entityDto(e.getName())).toList());
+        log.debug("Exported {} roles, {} workflows, {} entities",
+                  dto.getRoles().size(), dto.getWorkflows().size(), dto.getEntities().size());
+        return dto;
+    }
+
     @Transactional(readOnly = true)
     public String exportEntity(String entityName) {
-        MetaEntity entity = entityRepository.findByNameWithAll(entityName)
-            .orElseThrow(() -> new java.util.NoSuchElementException("Entity not found: " + entityName));
-
-        MetaYamlDto.EntityYaml yaml = MetaYamlDto.EntityYaml.from(entity);
-
-        // Attach permissions
-        List<MetaPermission> perms = permissionRepository.findByEntityId(entity.getId());
-        yaml.setPermissions(perms.stream().map(MetaYamlDto.PermissionYaml::from).toList());
-
-        // Attach views
-        yaml.setViews(entity.getViews().stream().map(MetaYamlDto.ViewYaml::from).toList());
-
-        try {
-            return YAML_MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(yaml);
-        } catch (IOException e) {
-            throw new RuntimeException("Failed to serialise entity to YAML", e);
-        }
+        return write(entityDto(entityName));
     }
 
-    // ── Build DTO ─────────────────────────────────────────────────────
+    private MetaYamlDto.EntityYaml entityDto(String name) {
+        MetaEntity entity = entityRepository.findByNameWithAll(name)
+            .orElseThrow(() -> new NoSuchElementException("Entity not found: " + name));
+        // Views are lazy: initialise inside the transaction.
+        entity.getViews().size();
+        return MetaYamlDto.EntityYaml.from(entity, permissionRepository.findByEntityId(entity.getId()));
+    }
 
-    private MetaYamlDto buildDto() {
-        var dto = new MetaYamlDto();
-
-        // Roles (exclude built-in ones — they are always seeded)
-        List<MetaYamlDto.RoleYaml> roles = roleRepository.findByBuiltInFalse()
-            .stream().map(MetaYamlDto.RoleYaml::from).toList();
-        dto.setRoles(roles);
-
-        // Workflows
-        List<MetaYamlDto.WorkflowYaml> workflows = workflowRepository.findAll().stream()
-            .map(w -> {
-                // Reload with full graph (states + transitions)
-                return workflowRepository.findByIdWithAll(w.getId())
-                    .map(MetaYamlDto.WorkflowYaml::from)
-                    .orElseThrow();
-            })
-            .toList();
-        dto.setWorkflows(workflows);
-
-        // Entities with fields + permissions
-        List<MetaYamlDto.EntityYaml> entities = entityRepository.findAll().stream()
-            .map(e -> {
-                MetaEntity full = entityRepository.findByNameWithAll(e.getName()).orElseThrow();
-                MetaYamlDto.EntityYaml yaml = MetaYamlDto.EntityYaml.from(full);
-                List<MetaPermission> perms = permissionRepository.findByEntityId(full.getId());
-                yaml.setPermissions(perms.stream().map(MetaYamlDto.PermissionYaml::from).toList());
-                yaml.setViews(full.getViews().stream().map(MetaYamlDto.ViewYaml::from).toList());
-                return yaml;
-            })
-            .toList();
-        dto.setEntities(entities);
-
-        log.debug("Exported config: {} entities, {} workflows, {} roles",
-                  entities.size(), workflows.size(), roles.size());
-        return dto;
+    private String write(Object value) {
+        try {
+            return MetaYamlCodec.YAML.writeValueAsString(value);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Failed to serialise configuration to YAML", e);
+        }
     }
 }

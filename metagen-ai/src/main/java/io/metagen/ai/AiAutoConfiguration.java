@@ -32,7 +32,7 @@ public class AiAutoConfiguration {
         return ChatClient.builder(model)
             .defaultOptions(
                 org.springframework.ai.anthropic.AnthropicChatOptions.builder()
-                    .maxTokens(4096)
+                    .withMaxTokens(4096)
                     .build()
             )
             .build();

@@ -3,7 +3,7 @@
 #
 # Starts only the infrastructure services (PostgreSQL + pgAdmin).
 # The Spring Boot app runs locally via:
-#   ./mvnw spring-boot:run -pl metagen-server -Pdev
+#   mvn spring-boot:run -pl metagen-server -Pdev
 #
 # Usage:
 #   docker compose -f docker/docker-compose.dev.yml up -d
@@ -21,7 +21,7 @@ services:
       POSTGRES_USER:     metagen
       POSTGRES_PASSWORD: metagen
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - postgres_dev_data:/var/lib/postgresql/data
     healthcheck:

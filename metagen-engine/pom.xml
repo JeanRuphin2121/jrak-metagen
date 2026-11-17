@@ -74,6 +74,12 @@
       <artifactId>mapstruct</artifactId>
     </dependency>
 
+    <!-- OpenAPI annotations used by DynamicRestController -->
+    <dependency>
+      <groupId>org.springdoc</groupId>
+      <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+    </dependency>
+
     <!-- Test -->
     <dependency>
       <groupId>org.testcontainers</groupId>

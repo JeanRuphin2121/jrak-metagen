@@ -27,6 +27,10 @@ public class DataInitializer implements ApplicationRunner {
 
     @Override
     public void run(ApplicationArguments args) {
+        if ("changeme".equals(adminPassword)) {
+            log.warn("The admin account uses the default password 'changeme' — "
+                   + "set METAGEN_ADMIN_PASSWORD before exposing this server.");
+        }
         authService.seedAdminIfAbsent(adminPassword);
         log.info("Metagen Platform ready — Studio API at /api/studio, Swagger at /swagger-ui.html");
     }

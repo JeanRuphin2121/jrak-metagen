@@ -8,20 +8,14 @@ import jakarta.validation.constraints.Size;
 import java.util.List;
 
 /**
- * Request body for creating a new entity via the Studio API.
+ * Request to create or update an entity definition.
  *
- * @param name        snake_case technical name (e.g. {@code supplier})
- * @param label       human-readable label (e.g. {@code Fournisseur})
- * @param description optional description shown in the Studio
- * @param softDelete  whether DELETE is soft (default: true)
- * @param auditable   whether created_at/updated_at/... are auto-managed (default: true)
- * @param workflowId  optional UUID of an existing workflow to attach
- * @param fields      initial fields to create with the entity
+ * <p>{@code softDelete} and {@code auditable} default to {@code true} when
+ * omitted (a primitive {@code boolean} would silently default to false).
  */
 public record CreateEntityRequest(
-
     @NotBlank
-    @Size(max = 100)
+    @Size(max = 58)
     @Pattern(regexp = "^[a-z][a-z0-9_]*$", message = "name must be snake_case")
     String name,
 
@@ -30,16 +24,19 @@ public record CreateEntityRequest(
 
     String description,
 
-    boolean softDelete,
-    boolean auditable,
+    Boolean softDelete,
 
-    String workflowId,
+    Boolean auditable,
+
+    /** Optional workflow name to attach at creation. */
+    String workflow,
 
     @Valid
     List<CreateFieldRequest> fields
 ) {
-    /** Canonical defaults match entity domain defaults. */
     public CreateEntityRequest {
-        if (fields == null) fields = List.of();
+        if (softDelete == null) softDelete = Boolean.TRUE;
+        if (auditable == null)  auditable  = Boolean.TRUE;
+        if (fields == null)     fields     = List.of();
     }
 }

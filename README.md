@@ -23,8 +23,8 @@
 
 - **Data modelling** — define entities, fields, and relations via UI or YAML
 - **Auto-generated CRUD API** — REST endpoints created dynamically from the model
-- **Workflow engine** — finite state machines with Groovy hook scripts
-- **RBAC** — role-based permissions with row-level filtering and field masking
+- **Workflow engine** — finite state machines with declarative guards, role checks, audit history and Java action beans
+- **RBAC** — role-based permissions with declarative row-level filters and field masks
 - **Custom views** — List, Form, Kanban, Calendar, Chart — configurable via JSON
 - **AI assistant** — describe your model in natural language, get a ready-to-use schema
 - **Config as Code** — export / import / diff your entire configuration as YAML
@@ -60,7 +60,7 @@ See [docs/architecture.md](docs/architecture.md) for the full design.
 
 - Java 21+
 - Docker & Docker Compose
-- Maven 3.9+ (or use the included `./mvnw` wrapper)
+- Maven 3.9+ 
 
 ### 1. Start the database
 
@@ -74,7 +74,7 @@ pgAdmin UI is at [http://localhost:5050](http://localhost:5050) (admin@metagen.d
 ### 2. Run the server
 
 ```bash
-./mvnw spring-boot:run -pl metagen-server
+mvn spring-boot:run -pl metagen-server
 ```
 
 The server starts on [http://localhost:8080](http://localhost:8080).  
@@ -126,32 +126,22 @@ metagen/
 
 ---
 
-## Development Roadmap
+## Status
 
-### Phase 1 — Foundation ✅ (current)
-- [x] Maven multi-module project structure
-- [x] Full metadata domain model (entities, fields, workflows, roles, views)
-- [x] Spring Data repositories with optimised JPQL queries
-- [x] Flyway schema migration
-- [x] Docker Compose (dev + prod)
-- [x] GitHub Actions CI pipeline
+| Area | State |
+|------|-------|
+| Dynamic CRUD (`/api/data/{entity}`), soft delete, search, sort, filters | done, covered by tests |
+| Table creation / additive migration (`deploy`) | done — never drops anything, reports what it could not reconcile |
+| Workflow: guards, role checks, actions, audit history, optimistic concurrency | done |
+| RBAC: roles, row filters, field masks (hidden / readonly) | done |
+| Studio API, config as YAML (dry run, atomic import, export) | done |
+| React UI: generated list / form / detail with workflow actions, Studio, YAML page | done (build-checked; no browser test suite yet) |
+| AI assistant (Spring AI + Claude) | compiles, disabled by default — **not exercised against the live API** |
+| Views (Kanban, Calendar, Chart) | stored in metadata, **not rendered yet** |
+| CLI (`metagen export/import/diff`) | not started — use the `/api/studio/config` endpoints |
 
-### Phase 2 — Runtime Engine 🚧
-- [ ] Dynamic CRUD REST API (`/api/data/{entity}`)
-- [ ] Auto table creation / migration when entity is deployed
-- [ ] Workflow engine (state transitions, condition + action scripts)
-- [ ] RBAC enforcement middleware
-
-### Phase 3 — Studio & Views 📋
-- [ ] Studio REST API (manage entities, fields, workflows, permissions)
-- [ ] React frontend — Studio UI
-- [ ] View engine (List, Form, Kanban, Chart)
-- [ ] Config as YAML (export / import / diff CLI)
-
-### Phase 4 — AI Assistant 🤖
-- [ ] Spring AI + Claude integration
-- [ ] Natural language → metadata schema generation
-- [ ] AI-suggested indexes and workflow design
+See [docs/low-code-model.md](docs/low-code-model.md) for how business logic is expressed
+and [config/demo-purchase-requests.yml](config/demo-purchase-requests.yml) for a complete example.
 
 ---
 
@@ -163,4 +153,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE).
+Apache License 2.0 — see `LICENSE` (add the Apache-2.0 text before publishing).

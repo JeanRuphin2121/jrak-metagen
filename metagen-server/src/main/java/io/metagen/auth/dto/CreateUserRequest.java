@@ -17,6 +17,6 @@ import java.util.List;
 public record CreateUserRequest(
     @NotBlank String username,
     @NotBlank @Email String email,
-    @NotBlank @Size(min = 6, message = "Password must be at least 6 characters") String password,
+    @NotBlank @Size(min = 8, message = "Password must be at least 8 characters") String password,
     List<String> roles
 ) {}

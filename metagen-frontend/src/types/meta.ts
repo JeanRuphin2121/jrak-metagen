@@ -76,6 +76,7 @@ export interface AddFieldRequest {
   required?: boolean
   searchable?: boolean
   position?: number
+  options?: Record<string, unknown>
 }
 
 // ── Roles & permissions ──────────────────────────────────────────────────────
@@ -94,7 +95,8 @@ export interface MetaPermission {
   canRead: boolean
   canWrite: boolean
   canDelete: boolean
-  rowFilterScript: string | null
+  rowFilter: Record<string, unknown> | null
+  fieldMask: Record<string, string[]> | null
 }
 
 // ── Workflow ──────────────────────────────────────────────────────────────────
@@ -103,17 +105,18 @@ export interface MetaState {
   id: string
   name: string
   label: string
-  isInitial: boolean
-  isTerminal: boolean
+  initial: boolean
+  terminal: boolean
   color: string | null
 }
 
 export interface MetaTransition {
   id: string
-  name: string
   label: string
-  fromStateName: string
-  toStateName: string
+  fromState: string
+  toState: string
+  condition: Record<string, unknown> | null
+  action: string | null
   requiredRole: string | null
 }
 
@@ -194,4 +197,65 @@ export interface RecordPage {
   totalPages: number
   page: number
   size: number
+}
+
+// ── Runtime metadata (what the generated UI needs, filtered by the user's roles) ──
+
+export interface RuntimeField {
+  name: string
+  label: string
+  type: MetaFieldType
+  required: boolean
+  unique: boolean
+  searchable: boolean
+  readonly: boolean
+  defaultValue: string | null
+  options: Record<string, unknown> | null
+}
+
+export interface RuntimeState {
+  name: string
+  label: string
+  color: string | null
+  initial: boolean
+  terminal: boolean
+}
+
+export interface RuntimeEntity {
+  name: string
+  label: string
+  description: string | null
+  hasWorkflow: boolean
+  states: RuntimeState[]
+  fields: RuntimeField[]
+  access: { canRead: boolean; canWrite: boolean; canDelete: boolean }
+}
+
+export interface CurrentUser {
+  username: string
+  roles: string[]
+  admin: boolean
+}
+
+export interface AvailableTransition {
+  id: string
+  label: string
+  toState: string
+  toStateLabel: string
+}
+
+export interface HistoryEntry {
+  from_state: string | null
+  to_state: string
+  transition_label: string
+  username: string
+  comment: string | null
+  created_at: string
+}
+
+/** RFC 7807 problem as returned by the API. */
+export interface ApiProblem {
+  title?: string
+  detail?: string
+  errors?: Record<string, string> | string[]
 }
